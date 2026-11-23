@@ -10,7 +10,7 @@ const DROP_REQUEST_HEADERS = new Set([
   // 프록시 관련 헤더
   'proxy-authorization', 'proxy-connection', 'forwarded', 'via',
   'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-port', 'x-real-ip',
-  // localhost에 저장된 쿠키. 사이트별 쿠키 처리는 이후 단계
+  // 브라우저 쿠키(__proxy_sid 등 localhost 쿠키). 사이트 쿠키는 서버 저장소에서 따로 붙인다
   'cookie',
   // 압축 해제는 fetch가 담당. 브라우저 값(zstd 등)을 넘기면 fetch가 못 푸는 인코딩이 올 수 있다
   'accept-encoding',
@@ -23,7 +23,7 @@ const DROP_RESPONSE_HEADERS = new Set([
   // fetch가 압축을 풀어 주므로 실제 바디와 맞지 않는다
   'content-encoding', 'content-length',
   'transfer-encoding', 'connection', 'keep-alive',
-  // 쿠키 처리는 이후 단계. 그대로 넘기면 localhost에 쿠키가 쌓인다
+  // 사이트 쿠키는 서버 저장소(cookies.js)가 보관. 그대로 넘기면 localhost에서 사이트끼리 섞인다
   'set-cookie',
   // 보안 정책: 원본 도메인 기준으로 쓰인 정책이라 프록시 안에서는 정상 자원까지 막는다
   'content-security-policy', 'content-security-policy-report-only',

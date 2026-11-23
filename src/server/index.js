@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { PROXY_PREFIX } from '../shared/url.js';
 import { handleProxy, sendError } from './proxy.js';
+import { CookieStore, handleCookieApi } from './cookies.js';
 
 const ROOT = new URL('../../', import.meta.url);
 
@@ -14,15 +15,20 @@ const STATIC_FILES = {
 };
 
 /**
- * @param {{ timeoutMs?: number }} [options]
+ * @param {{ timeoutMs?: number, cookieStore?: CookieStore }} [options]
+ *   cookieStore: 없으면 메모리 전용 저장소를 만든다
  */
-export function createProxyServer(options = {}) {
-  return http.createServer(async (req, res) => {
+export function createProxyServer({ timeoutMs, cookieStore = new CookieStore() } = {}) {
+  const server = http.createServer(async (req, res) => {
     try {
       if (req.url.startsWith(PROXY_PREFIX)) {
-        return await handleProxy(req, res, options);
+        const jar = cookieStore.sessionFor(req, res);
+        return await handleProxy(req, res, { timeoutMs, jar });
       }
       const pathname = req.url.split('?')[0];
+      if (pathname === '/__proxy/cookies') {
+        return await handleCookieApi(req, res, cookieStore);
+      }
       const entry = STATIC_FILES[pathname];
       if (entry && (req.method === 'GET' || req.method === 'HEAD')) {
         const body = await readFile(new URL(entry.file, ROOT));
@@ -35,12 +41,23 @@ export function createProxyServer(options = {}) {
       sendError(res, 500, '서버 오류', err.message);
     }
   });
+  server.cookieStore = cookieStore;
+  return server;
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
   const port = Number(process.env.PORT) || 8080;
-  createProxyServer().listen(port, '127.0.0.1', () => {
-    console.log(`프록시 실행 중: http://localhost:${port}/`);
+  const cookieFile = process.env.COOKIE_FILE || new URL('data/cookies.json', ROOT).pathname;
+  const cookieStore = new CookieStore({ file: cookieFile }).load().startAutoSave();
+  // 종료할 때 마지막 변경분 저장
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.once(signal, () => {
+      cookieStore.saveSync();
+      process.exit(0);
+    });
+  }
+  createProxyServer({ cookieStore }).listen(port, '127.0.0.1', () => {
+    console.log(`프록시 실행 중: http://localhost:${port}/  (쿠키 저장 파일: ${cookieFile})`);
   });
 }

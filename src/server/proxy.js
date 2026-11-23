@@ -20,9 +20,10 @@ const REWRITERS = {
  * /p/* 요청 처리.
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
- * @param {{ timeoutMs?: number }} [options]
+ * @param {{ timeoutMs?: number, jar?: import('./cookies.js').CookieJar }} [options]
+ *   jar: 이 브라우저 세션의 사이트 쿠키 저장소. 없으면 쿠키를 주고받지 않는다.
  */
-export async function handleProxy(req, res, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+export async function handleProxy(req, res, { timeoutMs = DEFAULT_TIMEOUT_MS, jar } = {}) {
   const target = decodeProxyUrl(req.url);
   if (!target) {
     return sendError(res, 400, '잘못된 URL', `프록시할 수 없는 주소입니다: ${req.url}`);
@@ -40,12 +41,15 @@ export async function handleProxy(req, res, { timeoutMs = DEFAULT_TIMEOUT_MS } =
   });
 
   const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
+  const requestHeaders = buildRequestHeaders(req.headers, target);
+  const cookie = jar?.getCookieString(target);
+  if (cookie) requestHeaders.cookie = cookie;
   let upstream;
   try {
-    debug(req.method, target);
+    debug(req.method, target, cookie ? `(쿠키 ${cookie.split('; ').length}개)` : '');
     upstream = await fetch(target, {
       method: req.method,
-      headers: buildRequestHeaders(req.headers, target),
+      headers: requestHeaders,
       body: hasBody ? req : undefined,
       duplex: hasBody ? 'half' : undefined,
       redirect: 'manual',
@@ -62,6 +66,9 @@ export async function handleProxy(req, res, { timeoutMs = DEFAULT_TIMEOUT_MS } =
   }
   // 타임아웃은 응답 헤더 수신까지만. 바디(큰 파일, 영상)는 제한하지 않는다.
   clearTimeout(timer);
+
+  // 원본의 Set-Cookie는 서버 저장소에만 보관 (브라우저로는 buildResponseHeaders에서 제거됨)
+  if (jar) for (const setCookie of upstream.headers.getSetCookie()) jar.setCookie(setCookie, target);
 
   const headers = buildResponseHeaders(upstream.headers, target);
   const contentType = upstream.headers.get('content-type');

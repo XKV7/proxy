@@ -125,11 +125,14 @@ test('PUT/DELETE 메서드 전달', async () => {
   assert.equal((await (await via('/echo', { method: 'DELETE' })).json()).method, 'DELETE');
 });
 
-test('브라우저 쿠키는 원본으로 보내지 않음 / set-cookie 제거', async () => {
+test('브라우저(localhost) 쿠키는 원본으로 보내지 않음 / 원본 set-cookie는 브라우저로 안 감', async () => {
   const echo = await (await via('/echo', { headers: { cookie: 'local=secret' } })).json();
   assert.equal(echo.cookie, null);
   const res = await via('/cookie');
-  assert.equal(res.headers.get('set-cookie'), null);
+  // 브라우저에는 프록시 세션 쿠키만 내려간다 (3단계)
+  const setCookies = res.headers.getSetCookie();
+  assert.equal(setCookies.length, 1);
+  assert.match(setCookies[0], /^__proxy_sid=/);
 });
 
 test('리다이렉트: 따라가지 않고 Location을 프록시 경로로 변환', async () => {
