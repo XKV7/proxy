@@ -1,35 +1,20 @@
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { decodeProxyUrl, encodeProxyUrl, resolve } from '../shared/url.js';
+import { decodeProxyUrl } from '../shared/url.js';
+import { buildRequestHeaders, buildResponseHeaders } from './headers.js';
+import { decodeBody } from './charset.js';
+import { rewriteHtml } from '../rewrite/html.js';
+import { rewriteCss } from '../rewrite/css.js';
 
 const debug = process.env.DEBUG === '1' ? (...a) => console.log('[proxy]', ...a) : () => {};
 
 export const DEFAULT_TIMEOUT_MS = 15_000;
 
-// 원본 서버로 넘길 요청 헤더(소문자). 나머지(cookie, host, referer, origin,
-// accept-encoding 등)는 이후 단계에서 다룬다.
-const FORWARD_REQUEST_HEADERS = [
-  'accept',
-  'accept-language',
-  'content-type',
-  'user-agent',
-  'range',
-  'if-range',
-];
-
-// 클라이언트로 돌려주지 않을 응답 헤더.
-// content-encoding/length: fetch가 압축을 풀어 주므로 실제 바디와 맞지 않는다.
-// set-cookie: 쿠키 처리는 이후 단계. 그대로 넘기면 localhost에 쿠키가 쌓인다.
-const DROP_RESPONSE_HEADERS = new Set([
-  'content-encoding',
-  'content-length',
-  'transfer-encoding',
-  'connection',
-  'keep-alive',
-  'set-cookie',
-]);
-
-const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+// Content-Type(MIME) -> 바디 변환기. 여기 없는 타입은 그대로 스트리밍한다.
+const REWRITERS = {
+  'text/html': { kind: 'html', rewrite: (text, url, charset) => rewriteHtml(text, url, { charset }) },
+  'text/css': { kind: 'css', rewrite: (text, url) => rewriteCss(text, url) },
+};
 
 /**
  * /p/* 요청 처리.
@@ -60,7 +45,7 @@ export async function handleProxy(req, res, { timeoutMs = DEFAULT_TIMEOUT_MS } =
     debug(req.method, target);
     upstream = await fetch(target, {
       method: req.method,
-      headers: pickRequestHeaders(req.headers),
+      headers: buildRequestHeaders(req.headers, target),
       body: hasBody ? req : undefined,
       duplex: hasBody ? 'half' : undefined,
       redirect: 'manual',
@@ -77,14 +62,39 @@ export async function handleProxy(req, res, { timeoutMs = DEFAULT_TIMEOUT_MS } =
   }
   // 타임아웃은 응답 헤더 수신까지만. 바디(큰 파일, 영상)는 제한하지 않는다.
   clearTimeout(timer);
-  debug(upstream.status, target);
 
-  res.writeHead(upstream.status, buildResponseHeaders(upstream, target));
+  const headers = buildResponseHeaders(upstream.headers, target);
+  const contentType = upstream.headers.get('content-type');
+  const rewriter = REWRITERS[mimeType(contentType)];
+  debug(upstream.status, rewriter ? rewriter.kind : 'stream', target);
 
   if (!upstream.body || req.method === 'HEAD') {
+    res.writeHead(upstream.status, headers);
     res.end();
     return;
   }
+
+  // 206(부분 응답)은 전체 문서가 아니므로 변환하지 않는다
+  if (rewriter && upstream.status !== 206) {
+    let output;
+    try {
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      const { text, charset } = decodeBody(buf, contentType, rewriter.kind);
+      output = Buffer.from(rewriter.rewrite(text, target, charset), 'utf8');
+      debug('변환 완료', rewriter.kind, charset, `${buf.length}B -> ${output.length}B`);
+    } catch (err) {
+      if (res.destroyed) return;
+      debug('변환 실패', target, err);
+      return sendError(res, 502, '응답 처리 실패', `${target} 응답을 읽거나 변환하지 못했습니다. (${describeError(err)})`);
+    }
+    headers['content-type'] = `${mimeType(contentType)}; charset=utf-8`;
+    headers['content-length'] = output.length;
+    res.writeHead(upstream.status, headers);
+    res.end(output);
+    return;
+  }
+
+  res.writeHead(upstream.status, headers);
   try {
     await pipeline(Readable.fromWeb(upstream.body), res);
   } catch (err) {
@@ -94,33 +104,8 @@ export async function handleProxy(req, res, { timeoutMs = DEFAULT_TIMEOUT_MS } =
   }
 }
 
-function pickRequestHeaders(incoming) {
-  const headers = {};
-  for (const name of FORWARD_REQUEST_HEADERS) {
-    if (incoming[name] !== undefined) headers[name] = incoming[name];
-  }
-  return headers;
-}
-
-function buildResponseHeaders(upstream, target) {
-  const headers = {};
-  for (const [name, value] of upstream.headers) {
-    if (DROP_RESPONSE_HEADERS.has(name)) continue;
-    headers[name] = value;
-  }
-  // redirect: 'manual' 이므로 브라우저가 Location을 따라간다.
-  // 프록시를 벗어나지 않도록 Location을 프록시 경로로 바꿔 준다.
-  if (REDIRECT_STATUSES.has(upstream.status) && headers.location) {
-    const absolute = resolve(headers.location, target);
-    if (absolute) {
-      try {
-        headers.location = encodeProxyUrl(absolute);
-      } catch {
-        // http(s)가 아닌 리다이렉트(mailto: 등)는 그대로 둔다
-      }
-    }
-  }
-  return headers;
+function mimeType(contentType) {
+  return (contentType ?? '').split(';')[0].trim().toLowerCase();
 }
 
 // fetch 에러는 "fetch failed" -> DOMException -> 실제 원인 처럼 cause가 중첩된다.

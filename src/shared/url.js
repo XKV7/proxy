@@ -49,6 +49,38 @@ export function resolve(relative, base) {
   }
 }
 
+/**
+ * 페이지 안의 URL 값(상대/절대/프로토콜 상대)을 프록시 경로로 바꾼다.
+ * 프록시 대상이 아닌 값은 원래 문자열을 그대로 돌려준다:
+ *   빈 값, "#frag"(같은 문서 참조), data:, javascript:, mailto:, blob:, about: 등
+ * @param {string} value 원본 문서에 적힌 URL
+ * @param {string} base 기준 절대 URL (문서 URL 또는 <base href>)
+ * @returns {string}
+ */
+export function proxify(value, base) {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.startsWith('#')) return value;
+  const absolute = resolve(trimmed, base);
+  if (!absolute || !parseHttpUrl(absolute)) return value;
+  return encodeProxyUrl(absolute);
+}
+
+/**
+ * Refresh 헤더 / <meta http-equiv="refresh"> 의 content 값 안의 URL을 프록시 경로로 바꾼다.
+ * 형식 예) "5", "0; url=/next", "3;URL='https://a.com/'"
+ * @param {string} content
+ * @param {string} base
+ * @returns {string}
+ */
+export function proxifyRefresh(content, base) {
+  if (typeof content !== 'string') return content;
+  const m = /^(\s*[\d.]*\s*[;,]?\s*(?:url\s*=\s*)?)(['"]?)(.*?)\2(\s*)$/is.exec(content);
+  if (!m || !m[3]) return content;
+  const [, prefix, quote, url, tail] = m;
+  return prefix + quote + proxify(url, base) + quote + tail;
+}
+
 function parseHttpUrl(value) {
   try {
     const u = new URL(value);

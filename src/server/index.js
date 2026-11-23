@@ -10,6 +10,7 @@ const ROOT = new URL('../../', import.meta.url);
 const STATIC_FILES = {
   '/': { file: 'public/index.html', type: 'text/html; charset=utf-8' },
   '/__proxy/url.js': { file: 'src/shared/url.js', type: 'text/javascript; charset=utf-8' },
+  '/__proxy/hook.js': { file: 'src/client/hook.js', type: 'text/javascript; charset=utf-8' },
 };
 
 /**
