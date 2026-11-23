@@ -170,15 +170,43 @@ function installHook(window) {
     });
   }
 
+  /**
+   * Request 객체를 URL만 바꿔 다시 만든다.
+   * new Request(새URL, 원래Request) 로 만들면 바디가 ReadableStream(스트리밍 업로드)으로 옮겨지는데,
+   * Chrome은 스트리밍 업로드를 HTTP/2 이상에서만 보낸다. http://localhost 같은 HTTP/1.1 연결에서는
+   * net::ERR_ALPN_NEGOTIATION_FAILED 로 요청 자체가 실패하므로, 바디를 먼저 읽어 일반 바디로 넘긴다.
+   * (integrity 는 넘기지 않는다: 프록시가 내용을 바꾸므로 해시가 맞지 않음)
+   */
+  async function retargetRequest(req, target, init) {
+    const options = {
+      method: req.method,
+      headers: req.headers,
+      credentials: req.credentials,
+      cache: req.cache,
+      redirect: req.redirect,
+      referrer: req.referrer,
+      referrerPolicy: req.referrerPolicy,
+      keepalive: req.keepalive,
+      signal: req.signal,
+      mode: req.mode === 'navigate' ? 'same-origin' : req.mode,
+    };
+    const hasBody = req.method !== 'GET' && req.method !== 'HEAD' && req.body !== null;
+    // fetch(req, { body }) 처럼 init 에 바디가 있으면 그쪽이 쓰이므로 원래 바디는 읽지 않는다
+    if (hasBody && !(init && 'body' in init)) options.body = await req.arrayBuffer();
+    return new window.Request(target, options);
+  }
+
   patchMethod(window, 'fetch', function (fetch, input, init) {
+    const startedAt = cookieJar.version();
+    let result;
     if (typeof window.Request === 'function' && input instanceof window.Request) {
       const target = toProxy(input.url);
-      if (target !== input.url) input = new window.Request(target, input);
-    } else if (input !== undefined) {
-      input = toProxy(input);
+      result = target === input.url
+        ? fetch.call(this, input, init)
+        : retargetRequest(input, target, init).then((req) => fetch.call(this, req, init));
+    } else {
+      result = fetch.call(this, input === undefined ? input : toProxy(input), init);
     }
-    const startedAt = cookieJar.version();
-    const result = fetch.call(this, input, init);
     // 원본 응답에 Set-Cookie가 있었으면 서버가 갱신된 document.cookie 값을 헤더로 알려 준다
     result.then((res) => cookieJar.fromHeader(res.headers.get(DOCUMENT_COOKIE_HEADER), startedAt), () => {});
     return result;

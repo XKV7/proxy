@@ -102,6 +102,20 @@ function createSite(name) {
 </script>`);
       case '/api/data':
         return json({ value: `data-from-${name}` });
+      case '/api/echo-body': {
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', () => json({ method: req.method, type: req.headers['content-type'] ?? null, body }));
+        return;
+      }
+      case '/request-object':
+        // fetch(new Request(url, { method: 'POST', body })) 형태 (유튜브 등 큰 사이트의 네트워크 라이브러리가 씀)
+        return html(`<p id="out"></p><script>
+  fetch(new Request('/api/echo-body', { method: 'POST', body: JSON.stringify({ a: 1 }), headers: { 'content-type': 'application/json' } }))
+    .then((r) => r.text())
+    .then((t) => { document.getElementById('out').textContent = t; })
+    .catch((e) => { document.getElementById('out').textContent = 'ERROR ' + e; });
+</script>`);
       case '/next':
         return html(`<p id="where">${name}:${u.pathname}${u.search}</p>`);
       default:
@@ -418,6 +432,14 @@ describe('B. 브라우저 (Playwright)', { skip: chromium ? false : 'playwright 
     assert.equal(result.time, 500);
     // 파일 중간부터 요청하는 Range 가 원본까지 전달됨
     assert.ok(siteA.log.ranges.some((r) => r && /^bytes=[1-9]\d*-/.test(r)), JSON.stringify(siteA.log.ranges));
+  });
+
+  test('fetch(Request 객체) 의 POST 바디가 HTTP/1.1 연결에서도 전송됨', async () => {
+    await page.goto(`${browserProxyUrl}/p/${A}/request-object`);
+    await page.waitForFunction(() => document.getElementById('out').textContent);
+    assert.equal(await page.textContent('#out'), JSON.stringify({ method: 'POST', type: 'application/json', body: '{"a":1}' }));
+    await page.goto(`${browserProxyUrl}/p/${A}/app`);
+    await page.waitForFunction(() => document.getElementById('fetched')?.textContent);
   });
 
   test('location.href = "/next..." 이동이 프록시 안에서 일어남', async () => {

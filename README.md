@@ -21,6 +21,9 @@ npm start            # http://localhost:8080/
 | `COOKIE_FILE` | `data/cookies.json` | 사이트 쿠키 저장 파일 (10초마다, 종료 시 저장) |
 | `JS_CACHE_DIR` | `data/js-cache` | JS 변환 결과 디스크 캐시 |
 
+> `node src/server/index.js`로 직접 실행하지 말고 `npm start`를 쓰세요. `npm start`는 `--max-http-header-size=131072` 옵션을 붙여 실행합니다.
+> Node 내장 fetch는 원본 응답 헤더가 이 한도(기본 16KB)를 넘으면 실패하는데, 유튜브 모바일(m.youtube.com)처럼 헤더가 큰 사이트가 있습니다.
+
 시작 페이지에서 주소를 입력하면 `/p/<원본 URL>`로 이동합니다. 주소창에 직접 `http://localhost:8080/p/https://example.com/` 처럼 입력해도 됩니다.
 시작 페이지 아래에서 현재 세션의 사이트별 쿠키 수를 보고 **쿠키 초기화**를 할 수 있습니다.
 (프록시 안의 페이지에서 시작 페이지로 돌아올 때는 `/__proxy/`를 쓰세요. 프록시 페이지 안의 `/`는 원본 사이트의 `/`로 바뀝니다.)
