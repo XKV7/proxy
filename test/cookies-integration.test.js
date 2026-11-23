@@ -17,6 +17,10 @@ function cookieSite() {
       res.writeHead(302, { location: '/cookies', 'set-cookie': headers });
       return res.end();
     }
+    if (u.pathname === '/page') {
+      res.writeHead(200, { 'content-type': 'text/html', 'set-cookie': 'visited=1; Path=/' });
+      return res.end('<html><head></head><body>page</body></html>');
+    }
     if (u.pathname === '/cookies/login') {
       res.writeHead(200, { 'set-cookie': ['token=secret; Path=/; HttpOnly', 'theme=dark; Path=/'] });
       return res.end('ok');
@@ -171,4 +175,22 @@ test('서버 재시작(파일에서 다시 로드) 후에도 쿠키 유지', asy
     restarted.closeAllConnections();
     restarted.close();
   }
+});
+
+test('HTML 응답: hook 태그에 document.cookie 초기값(HttpOnly 제외, 이 응답의 Set-Cookie 포함)', async () => {
+  const b = browser();
+  await b.request(`/p/${A}/cookies/login`); // token(HttpOnly), theme
+  const html = await (await b.request(`/p/${A}/page`)).text();
+  assert.match(html, /<script src="\/__proxy\/hook\.js" data-proxy-cookie="theme=dark; visited=1"><\/script>/);
+});
+
+test('원본 응답에 Set-Cookie가 있으면 x-proxy-document-cookie 헤더로 요청한 페이지의 새 document.cookie', async () => {
+  const b = browser();
+  await b.request(`/p/${A}/cookies`);
+  const referer = `${proxyUrl}/p/${A}/some/page`;
+  const res = await b.request(`/p/${A}/cookies/login`, { headers: { referer } });
+  assert.equal(decodeURIComponent(res.headers.get('x-proxy-document-cookie')), 'theme=dark');
+  // Set-Cookie가 없는 응답, Referer가 없는 응답에는 붙이지 않음
+  assert.equal((await b.request(`/p/${A}/cookies`, { headers: { referer } })).headers.get('x-proxy-document-cookie'), null);
+  assert.equal((await b.request(`/p/${A}/cookies/login`)).headers.get('x-proxy-document-cookie'), null);
 });

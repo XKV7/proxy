@@ -1,26 +1,27 @@
 // HTML 안의 URL 속성들을 프록시 경로로 바꾼다. (parse5로 파싱 -> 트리 수정 -> 직렬화)
 import { parse, serialize } from 'parse5';
-import { proxify, proxifyRefresh, resolve } from '../shared/url.js';
+import { proxify, proxifyRefresh, resolve, rewriteAttribute, rewriteSrcset } from '../shared/url.js';
 import { rewriteCss, rewriteInlineStyle } from './css.js';
 
 export const HOOK_SCRIPT_SRC = '/__proxy/hook.js';
 
-// 값 하나가 URL인 속성. data 는 <object> 에서만 URL이다.
-const URL_ATTRS = new Set(['href', 'src', 'action', 'formaction', 'poster']);
-const SRCSET_ATTRS = new Set(['srcset', 'imagesrcset']);
+// srcset 파서와 URL 속성 표는 브라우저(hook.js)와 공유하므로 shared/url.js 에 있다
+export { rewriteSrcset };
 
 /**
  * @param {string} html 디코딩된 HTML 문자열
  * @param {string} documentUrl 이 문서의 원본 URL
- * @param {{ charset?: string }} [options] charset: 원본 문서의 문자 인코딩 (예: 'euc-kr')
+ * @param {{ charset?: string, cookie?: string }} [options]
+ *   charset: 원본 문서의 문자 인코딩 (예: 'euc-kr')
+ *   cookie: 이 문서에서 document.cookie 로 보일 쿠키 문자열 (HttpOnly 제외). hook.js가 초기값으로 쓴다
  * @returns {string}
  */
-export function rewriteHtml(html, documentUrl, { charset = 'utf-8' } = {}) {
+export function rewriteHtml(html, documentUrl, { charset = 'utf-8', cookie = '' } = {}) {
   const document = parse(html);
   const base = findBase(document, documentUrl);
-  const ctx = { base, charset: charset.toLowerCase(), baseSeen: false };
+  const ctx = { base, charset: charset.toLowerCase(), baseSeen: false, convert: (u) => proxify(u, base) };
   walk(document, (node) => rewriteNode(node, ctx));
-  injectHook(document);
+  injectHook(document, cookie);
   return serialize(document);
 }
 
@@ -73,12 +74,10 @@ function rewriteNode(node, ctx) {
         ctx.baseSeen = true;
         attr.value = proxify(attr.value, ctx.base);
       }
-    } else if (URL_ATTRS.has(name) || (name === 'data' && tag === 'object')) {
-      attr.value = proxify(attr.value, ctx.base);
-    } else if (SRCSET_ATTRS.has(name)) {
-      attr.value = rewriteSrcset(attr.value, ctx.base);
     } else if (name === 'style') {
       attr.value = rewriteInlineStyle(attr.value, ctx.base);
+    } else {
+      attr.value = rewriteAttribute(tag, name, attr.value, ctx.convert);
     }
   }
 
@@ -88,43 +87,9 @@ function rewriteNode(node, ctx) {
   }
 }
 
-/**
- * srcset = "url 1x, url 2x" / "url 480w, url 800w"
- * URL 안에 쉼표가 있을 수 있어(data: URL 등) 단순 split 대신 명세의 파싱 방식을 따른다.
- */
-export function rewriteSrcset(value, base) {
-  const candidates = [];
-  const s = value;
-  let i = 0;
-  while (i < s.length) {
-    while (i < s.length && (isSpace(s[i]) || s[i] === ',')) i++;
-    if (i >= s.length) break;
-    const start = i;
-    while (i < s.length && !isSpace(s[i])) i++;
-    let url = s.slice(start, i);
-    let descriptors = '';
-    if (/,+$/.test(url)) {
-      url = url.replace(/,+$/, '');
-    } else {
-      const dStart = i;
-      let depth = 0;
-      while (i < s.length) {
-        const c = s[i];
-        if (c === '(') depth++;
-        else if (c === ')') depth = Math.max(0, depth - 1);
-        else if (c === ',' && depth === 0) break;
-        i++;
-      }
-      descriptors = s.slice(dStart, i).trim();
-    }
-    const next = proxify(url, base);
-    candidates.push(descriptors ? `${next} ${descriptors}` : next);
-  }
-  return candidates.join(', ');
-}
-
-// <head> 맨 앞에 클라이언트 훅 스크립트 자리를 만든다 (parse5는 head를 항상 만들어 준다)
-function injectHook(document) {
+// <head> 맨 앞에 클라이언트 훅 스크립트를 넣는다 (parse5는 head를 항상 만들어 준다).
+// document.cookie 는 동기 API라서, 응답 시점의 쿠키를 속성으로 함께 내려 보내 첫 읽기부터 맞게 한다.
+function injectHook(document, cookie) {
   let head;
   walk(document, (node) => {
     if (node.tagName === 'head' && isHtml(node)) {
@@ -136,7 +101,10 @@ function injectHook(document) {
   const script = {
     nodeName: 'script',
     tagName: 'script',
-    attrs: [{ name: 'src', value: HOOK_SCRIPT_SRC }],
+    attrs: [
+      { name: 'src', value: HOOK_SCRIPT_SRC },
+      { name: 'data-proxy-cookie', value: cookie },
+    ],
     namespaceURI: head.namespaceURI,
     childNodes: [],
     parentNode: head,
@@ -158,7 +126,6 @@ function walk(node, visit) {
 }
 
 const isHtml = (node) => node.namespaceURI === 'http://www.w3.org/1999/xhtml';
-const isSpace = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
 const getAttr = (node, name) => node.attrs.find((a) => a.name === name && !a.prefix)?.value;
 function setAttr(node, name, value) {
   const attr = node.attrs.find((a) => a.name === name && !a.prefix);

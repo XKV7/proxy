@@ -55,7 +55,8 @@ export function buildRequestHeaders(incoming, target) {
   return headers;
 }
 
-function refererToOriginal(referer) {
+/** 브라우저의 Referer(프록시 페이지 URL) -> 원본 페이지 URL. 프록시 페이지가 아니면 null */
+export function refererToOriginal(referer) {
   if (!referer) return null;
   try {
     const u = new URL(referer);

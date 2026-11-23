@@ -15,5 +15,8 @@
   "dependencies": {
     "parse5": "^8.1.1",
     "postcss": "^8.5.33"
+  },
+  "devDependencies": {
+    "jsdom": "^31.0.1"
   }
 }

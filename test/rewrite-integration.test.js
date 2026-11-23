@@ -87,7 +87,7 @@ test('HTML: gzip 해제 후 링크/이미지/CSS 링크 변환, hook 삽입, 보
   // 원본이 http:// 이므로 프로토콜 상대 URL도 http://
   assert.match(html, /src="\/p\/http:\/\/cdn\.example\.net\/a\.png"/);
   assert.match(html, new RegExp(`<link rel="stylesheet" href="/p/${originUrl}/static/site.css">`));
-  assert.match(html, /<head><script src="\/__proxy\/hook\.js"><\/script>/);
+  assert.match(html, /<head><script src="\/__proxy\/hook\.js" data-proxy-cookie=""><\/script>/);
 });
 
 test('CSS: url()을 CSS 파일 기준으로 변환', async () => {

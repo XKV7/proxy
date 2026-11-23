@@ -124,6 +124,139 @@ function originalPageUrl(url, proxyOrigin) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 브라우저(hook.js) 쪽에서 쓰는 변환. 페이지 JS가 넘기는 값은 원본 URL일 수도,
+// 이미 프록시 URL일 수도(예: 프록시가 바꿔 둔 a.href 를 다시 읽어 대입) 있다.
+// ---------------------------------------------------------------------------
+
+/**
+ * 페이지 JS가 넘긴 URL -> 프록시 경로. 이미 프록시 경로면 그대로 둔다(이중 변환 방지).
+ * @param {*} value 문자열 또는 URL 객체 등 (String()으로 변환)
+ * @param {string} base 원본 기준 URL (원본 문서 URL 또는 <base href>)
+ * @param {string} proxyOrigin 예) "http://localhost:8080"
+ * @returns {string}
+ */
+export function proxifyClientUrl(value, base, proxyOrigin) {
+  const s = String(value);
+  const trimmed = s.trim();
+  let path = null;
+  if (trimmed.startsWith(proxyOrigin + '/')) path = trimmed.slice(proxyOrigin.length);
+  else if (trimmed.startsWith('/') && !trimmed.startsWith('//')) path = trimmed;
+  if (path !== null) {
+    // /__proxy/... 또는 /p/<올바른 URL> 이면 이미 프록시 경로.
+    // /p/123 처럼 디코딩이 안 되는 것은 원본 사이트의 경로로 본다.
+    if (path.startsWith(CLIENT_PREFIX) || decodeProxyUrl(path.split('#')[0])) return trimmed;
+    // 프록시 origin 기준으로 해석된 루트 상대 경로 -> 원본 사이트의 같은 경로
+    return proxify(path, base);
+  }
+  return proxify(s, base);
+}
+
+/**
+ * WebSocket URL -> 프록시 WebSocket 엔드포인트 (ws://localhost:PORT/__proxy/ws?url=...)
+ * http(s) URL과 상대 URL도 허용한다 (최신 WebSocket 명세와 같음).
+ * @param {*} value 페이지 JS가 넘긴 URL
+ * @param {string} base 원본 기준 URL
+ * @param {string} proxyOrigin 예) "http://localhost:8080" (https면 wss로)
+ * @returns {string|null} 변환할 수 없으면 null (호출한 쪽이 원래 값으로 네이티브 에러를 내게 둔다)
+ */
+export function encodeWsProxyUrl(value, base, proxyOrigin) {
+  let u;
+  try {
+    u = new URL(String(value), base);
+  } catch {
+    return null;
+  }
+  if (u.protocol === 'http:') u.protocol = 'ws:';
+  else if (u.protocol === 'https:') u.protocol = 'wss:';
+  if (u.protocol !== 'ws:' && u.protocol !== 'wss:') return null;
+  u.hash = '';
+  const proxy = new URL(proxyOrigin);
+  const wsOrigin = (proxy.protocol === 'https:' ? 'wss://' : 'ws://') + proxy.host;
+  return `${wsOrigin}${CLIENT_PREFIX}ws?url=${encodeURIComponent(u.href)}`;
+}
+
+/**
+ * 프록시 WebSocket 요청 경로 -> 원본 ws(s) URL
+ * @param {string} pathAndQuery 예) "/__proxy/ws?url=wss%3A%2F%2Fexample.com%2Fsocket"
+ * @returns {string|null}
+ */
+export function decodeWsProxyUrl(pathAndQuery) {
+  try {
+    const u = new URL(pathAndQuery, 'http://proxy.invalid');
+    if (u.pathname !== `${CLIENT_PREFIX}ws`) return null;
+    const target = new URL(u.searchParams.get('url'));
+    return target.protocol === 'ws:' || target.protocol === 'wss:' ? target.href : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// HTML 속성 (서버 html.js와 브라우저 hook.js가 공유)
+// ---------------------------------------------------------------------------
+
+// 값 하나가 URL인 속성. data 는 <object> 에서만 URL이다.
+const URL_ATTRS = new Set(['href', 'src', 'action', 'formaction', 'poster']);
+const SRCSET_ATTRS = new Set(['srcset', 'imagesrcset']);
+
+/** 이 요소의 이 속성이 URL(또는 srcset)을 담는가. tag/attr는 소문자 */
+export function isUrlAttribute(tag, attr) {
+  return URL_ATTRS.has(attr) || SRCSET_ATTRS.has(attr) || (attr === 'data' && tag === 'object');
+}
+
+/**
+ * 속성 값을 변환한다. URL 속성이 아니면 그대로.
+ * @param {string} tag 소문자 태그 이름
+ * @param {string} attr 소문자 속성 이름 (네임스페이스 접두사 제외)
+ * @param {string} value
+ * @param {(url: string) => string} convert URL 하나를 바꾸는 함수
+ */
+export function rewriteAttribute(tag, attr, value, convert) {
+  if (SRCSET_ATTRS.has(attr)) return rewriteSrcset(value, convert);
+  if (URL_ATTRS.has(attr) || (attr === 'data' && tag === 'object')) return convert(value);
+  return value;
+}
+
+/**
+ * srcset = "url 1x, url 2x" / "url 480w, url 800w"
+ * URL 안에 쉼표가 있을 수 있어(data: URL 등) 단순 split 대신 명세의 파싱 방식을 따른다.
+ * @param {string} value
+ * @param {string | ((url: string) => string)} baseOrConvert 기준 URL(-> proxify) 또는 변환 함수
+ */
+export function rewriteSrcset(value, baseOrConvert) {
+  const convert = typeof baseOrConvert === 'function' ? baseOrConvert : (u) => proxify(u, baseOrConvert);
+  const isSpace = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
+  const candidates = [];
+  const s = value;
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && (isSpace(s[i]) || s[i] === ',')) i++;
+    if (i >= s.length) break;
+    const start = i;
+    while (i < s.length && !isSpace(s[i])) i++;
+    let url = s.slice(start, i);
+    let descriptors = '';
+    if (/,+$/.test(url)) {
+      url = url.replace(/,+$/, '');
+    } else {
+      const dStart = i;
+      let depth = 0;
+      while (i < s.length) {
+        const c = s[i];
+        if (c === '(') depth++;
+        else if (c === ')') depth = Math.max(0, depth - 1);
+        else if (c === ',' && depth === 0) break;
+        i++;
+      }
+      descriptors = s.slice(dStart, i).trim();
+    }
+    const next = convert(url);
+    candidates.push(descriptors ? `${next} ${descriptors}` : next);
+  }
+  return candidates.join(', ');
+}
+
 function parseHttpUrl(value) {
   try {
     const u = new URL(value);

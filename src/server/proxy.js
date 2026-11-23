@@ -1,6 +1,7 @@
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { decodeProxyUrl } from '../shared/url.js';
+import { refererToOriginal } from './headers.js';
 import { buildRequestHeaders, buildResponseHeaders } from './headers.js';
 import { decodeBody } from './charset.js';
 import { rewriteHtml } from '../rewrite/html.js';
@@ -9,10 +10,12 @@ import { rewriteCss } from '../rewrite/css.js';
 const debug = process.env.DEBUG === '1' ? (...a) => console.log('[proxy]', ...a) : () => {};
 
 export const DEFAULT_TIMEOUT_MS = 15_000;
+// hook.js 의 DOCUMENT_COOKIE_HEADER 와 같은 이름
+export const DOCUMENT_COOKIE_HEADER = 'x-proxy-document-cookie';
 
 // Content-Type(MIME) -> 바디 변환기. 여기 없는 타입은 그대로 스트리밍한다.
 const REWRITERS = {
-  'text/html': { kind: 'html', rewrite: (text, url, charset) => rewriteHtml(text, url, { charset }) },
+  'text/html': { kind: 'html', rewrite: (text, url, { charset, cookie }) => rewriteHtml(text, url, { charset, cookie }) },
   'text/css': { kind: 'css', rewrite: (text, url) => rewriteCss(text, url) },
 };
 
@@ -68,9 +71,14 @@ export async function handleProxy(req, res, { timeoutMs = DEFAULT_TIMEOUT_MS, ja
   clearTimeout(timer);
 
   // 원본의 Set-Cookie는 서버 저장소에만 보관 (브라우저로는 buildResponseHeaders에서 제거됨)
-  if (jar) for (const setCookie of upstream.headers.getSetCookie()) jar.setCookie(setCookie, target);
+  const setCookies = jar ? upstream.headers.getSetCookie() : [];
+  for (const setCookie of setCookies) jar.setCookie(setCookie, target);
 
   const headers = buildResponseHeaders(upstream.headers, target);
+
+  // 쿠키가 바뀌었으면, 요청을 보낸 페이지의 document.cookie 새 값을 알려 준다 (hook.js가 캐시 갱신)
+  const pageUrl = setCookies.length ? refererToOriginal(req.headers.referer) : null;
+  if (pageUrl) headers[DOCUMENT_COOKIE_HEADER] = encodeURIComponent(jar.getCookieString(pageUrl, { http: false }));
   const contentType = upstream.headers.get('content-type');
   const rewriter = REWRITERS[mimeType(contentType)];
   debug(upstream.status, rewriter ? rewriter.kind : 'stream', target);
@@ -87,7 +95,9 @@ export async function handleProxy(req, res, { timeoutMs = DEFAULT_TIMEOUT_MS, ja
     try {
       const buf = Buffer.from(await upstream.arrayBuffer());
       const { text, charset } = decodeBody(buf, contentType, rewriter.kind);
-      output = Buffer.from(rewriter.rewrite(text, target, charset), 'utf8');
+      // 이 응답의 Set-Cookie까지 반영된 값 (위에서 저장함)
+      const cookie = jar ? jar.getCookieString(target, { http: false }) : '';
+      output = Buffer.from(rewriter.rewrite(text, target, { charset, cookie }), 'utf8');
       debug('변환 완료', rewriter.kind, charset, `${buf.length}B -> ${output.length}B`);
     } catch (err) {
       if (res.destroyed) return;

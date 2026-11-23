@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { PROXY_PREFIX } from '../shared/url.js';
 import { handleProxy, sendError } from './proxy.js';
 import { CookieStore, handleCookieApi } from './cookies.js';
+import { buildHookScript } from './hook-bundle.js';
 
 const ROOT = new URL('../../', import.meta.url);
 
@@ -17,7 +18,8 @@ const STATIC_FILES = {
   // 프록시 자체 페이지(에러 페이지 등)에서 시작 페이지로 돌아올 때는 이 주소를 쓴다
   '/__proxy/': START_PAGE,
   '/__proxy/url.js': { file: 'src/shared/url.js', type: JS },
-  '/__proxy/hook.js': { file: 'src/client/hook.js', type: JS },
+  // url.js + hook.js 를 합친 일반 스크립트 (hook-bundle.js 참고)
+  '/__proxy/hook.js': { build: buildHookScript, type: JS },
   // 스크립트 위치(/__proxy/)보다 넓은 scope(/)로 등록하려면 이 헤더가 필요하다
   '/__proxy/sw.js': { file: 'src/client/sw.js', type: JS, headers: { 'service-worker-allowed': '/' } },
 };
@@ -39,7 +41,7 @@ export function createProxyServer({ timeoutMs, cookieStore = new CookieStore() }
       }
       const entry = STATIC_FILES[pathname];
       if (entry && (req.method === 'GET' || req.method === 'HEAD')) {
-        const body = await readFile(new URL(entry.file, ROOT));
+        const body = entry.build ? Buffer.from(await entry.build()) : await readFile(new URL(entry.file, ROOT));
         res.writeHead(200, {
           'content-type': entry.type,
           'content-length': body.length,
