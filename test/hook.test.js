@@ -581,3 +581,66 @@ test('opener 없이 연 탭: opener 는 null, close() 는 브라우저 기본 �
   // native 처럼 보임
   assert.equal(w.close.name, 'close');
 });
+
+// ---------------------------------------------------------------------------
+// 빈 iframe(about:blank) 의 "깨끗한" 함수를 꺼내 쓰는 사이트 (유튜브 등)
+// ---------------------------------------------------------------------------
+test('빈 iframe 에서 꺼낸 함수도 바뀐 함수 (contentWindow 접근 시 적용)', async () => {
+  const { w, d, calls, originals } = setup();
+  const frame = d.createElement('iframe');
+  d.body.append(frame);
+  const child = frame.contentWindow;
+
+  // iframe 의 History.prototype.pushState 를 메인 창 history 에 호출
+  child.History.prototype.pushState.call(w.history, null, '', '/results?search_query=x');
+  assert.equal(w.location.pathname, `/p/${SITE}/results`);
+  assert.equal(w.__proxy.url, `${SITE}/results?search_query=x`);
+
+  // iframe 의 fetch / XHR / 요소 속성 setter
+  await child.fetch('/api/data');
+  assert.equal(calls.fetch.at(-1).input, `/p/${SITE}/api/data`);
+  const img = child.document.createElement('img');
+  img.src = '/i.png';
+  assert.equal(img.getAttribute('src'), `/p/${SITE}/i.png`);
+
+  // 바꾼 함수가 iframe 쪽에서도 native 처럼 보임
+  assert.equal(child.Function.prototype.toString.call(child.fetch), originals.fetch);
+  // 메인 창 전용 동작(opener/close)은 복사하지 않음
+  assert.notEqual(child.close, w.close);
+});
+
+test('contentDocument 로 접근해도, window[0] 처럼 요소를 거치지 않아도 적용', async () => {
+  const { w, d } = setup();
+  const a = d.createElement('iframe');
+  d.body.append(a);
+  const viaDoc = a.contentDocument.defaultView;
+  viaDoc.History.prototype.replaceState.call(w.history, null, '', '/via-doc');
+  assert.equal(w.__proxy.url, `${SITE}/via-doc`);
+
+  const b = d.createElement('iframe');
+  d.body.append(b);
+  await tick(); // MutationObserver
+  w[1].History.prototype.replaceState.call(w.history, null, '', '/via-index');
+  assert.equal(w.__proxy.url, `${SITE}/via-index`);
+});
+
+test('자기 hook 이 있는 프록시 창(/p/... iframe)은 건드리지 않음', () => {
+  let own, ownPush;
+  const { w, d } = setup({
+    // hook 설치 전에 이미 자기 hook(__proxy)이 있는 iframe 을 준비 (원래 접근자로 꺼내므로 적용되지 않음)
+    beforeHook: (win) => {
+      const f = win.document.createElement('iframe');
+      win.document.body.append(f);
+      own = f.contentWindow;
+      Object.defineProperty(own, '__proxy', { value: { own: true } });
+      ownPush = own.History.prototype.pushState;
+    },
+  });
+  // hook 설치 후 접근해도 그 창의 함수는 그대로
+  assert.equal(d.querySelector('iframe').contentWindow, own);
+  assert.equal(own.History.prototype.pushState, ownPush);
+  // 빈 iframe 은 메인 창의 함수로 바뀜
+  const blank = d.createElement('iframe');
+  d.body.append(blank);
+  assert.equal(blank.contentWindow.History.prototype.pushState, w.History.prototype.pushState);
+});

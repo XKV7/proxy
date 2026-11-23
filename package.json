@@ -8,8 +8,8 @@
     "node": ">=20"
   },
   "scripts": {
-    "start": "node src/server/index.js",
-    "dev": "DEBUG=1 node src/server/index.js",
+    "start": "node --max-http-header-size=131072 src/server/index.js",
+    "dev": "DEBUG=1 node --max-http-header-size=131072 src/server/index.js",
     "test": "node --test"
   },
   "dependencies": {
