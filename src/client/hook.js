@@ -55,6 +55,22 @@ function installHook(window) {
     } catch { /* Proxy 등은 무시 */ }
     return fake;
   }
+  // ---------------------------------------------------------------------------
+  // 바꾼 속성 기록: 같은 origin 의 빈 iframe(about:blank)/팝업에도 똑같이 적용하기 위해 (adoptWindow)
+  // 큰 사이트는 함수 바꿔치기를 피하려고 숨겨진 iframe 의 "깨끗한" 함수
+  // (iframe.contentWindow.History.prototype.pushState 등)를 꺼내 쓰기 때문이다.
+  // ---------------------------------------------------------------------------
+  const patched = []; // { path: '' (window) | 'History' (History.prototype) ..., prop }
+  function remember(obj, prop) {
+    let path = null;
+    if (obj === window) path = '';
+    else {
+      const ctor = Object.getOwnPropertyDescriptor(obj, 'constructor')?.value;
+      if (typeof ctor === 'function' && ctor.prototype === obj && ctor.name) path = ctor.name;
+    }
+    if (path !== null) patched.push({ path, prop });
+  }
+
   // 메서드 축약 문법으로 만들면 native 메서드처럼 prototype 속성이 없고 new 로 호출할 수 없다
   const replaceToString = {
     toString() {
@@ -63,9 +79,13 @@ function installHook(window) {
   }.toString;
   disguise(replaceToString, nativeToString);
   window.Function.prototype.toString = replaceToString;
+  remember(window.Function.prototype, 'toString');
 
-  /** obj[name] 메서드를 impl로 바꾼다. impl(original, ...args)는 this를 그대로 받는다 */
-  function patchMethod(obj, name, impl) {
+  /**
+   * obj[name] 메서드를 impl로 바꾼다. impl(original, ...args)는 this를 그대로 받는다
+   * frames: false 면 다른 창(빈 iframe 등)에는 복사하지 않는다 (창마다 의미가 다른 것)
+   */
+  function patchMethod(obj, name, impl, { frames = true } = {}) {
     const original = obj?.[name];
     if (typeof original !== 'function') return;
     const fake = {
@@ -75,13 +95,14 @@ function installHook(window) {
     }[name];
     disguise(fake, original);
     obj[name] = fake;
+    if (frames) remember(obj, name);
   }
 
   /**
    * 접근자 속성의 setter/getter를 바꾼다. 원래 descriptor를 기반으로 일부만 교체.
    * defineIfMissing: 환경에 원래 속성이 없어도 새로 정의 (예: document.domain이 없는 환경)
    */
-  function patchAccessor(obj, prop, { get, set, defineIfMissing = false }) {
+  function patchAccessor(obj, prop, { get, set, defineIfMissing = false, frames = true }) {
     if (!obj) return;
     let desc = Object.getOwnPropertyDescriptor(obj, prop);
     if (!desc && defineIfMissing) {
@@ -98,6 +119,7 @@ function installHook(window) {
       disguise(next.set, desc.set);
     }
     Object.defineProperty(obj, prop, next);
+    if (frames) remember(obj, prop);
   }
 
   /** 생성자를 Proxy로 감싸 첫 인자(URL)를 바꾼다. prototype, 정적 상수, instanceof, 상속이 그대로 유지된다 */
@@ -111,6 +133,7 @@ function installHook(window) {
     });
     nativeSource.set(Wrapped, nativeToString.call(Original));
     window[name] = Wrapped;
+    remember(window, name);
   }
 
   // ---------------------------------------------------------------------------
@@ -235,7 +258,9 @@ function installHook(window) {
   // 창/히스토리
   // ---------------------------------------------------------------------------
   patchMethod(window, 'open', function (open, url, ...rest) {
-    return open.call(this, url === undefined || url === null ? url : toProxy(url), ...rest);
+    const opened = open.call(this, url === undefined || url === null ? url : toProxy(url), ...rest);
+    adoptWindow(opened); // window.open('') 처럼 빈 창이면 그 창의 함수도 바꿔 둔다
+    return opened;
   });
 
   for (const name of ['pushState', 'replaceState']) {
@@ -497,6 +522,7 @@ function installHook(window) {
     const getter = { get [name]() { return wrapped; } }.__lookupGetter__(name);
     if (desc?.get) disguise(getter, desc.get);
     Object.defineProperty(window, name, { get: getter, configurable: true, enumerable: desc?.enumerable ?? true });
+    remember(window, name);
   }
 
   function wrapStorage(storage, prefix) {
@@ -661,11 +687,12 @@ function installHook(window) {
       const o = getter.call(this);
       return o && apiOf(o) ? o : null;
     },
+    frames: false,
   });
   patchMethod(window, 'close', function (close, ...args) {
     if (this === window && !openedByProxiedPage) return undefined;
     return close.apply(this, args);
-  });
+  }, { frames: false });
 
   // top/parent: 위쪽 창도 프록시 페이지일 때만 그 창을 보여 준다 (프록시 밖의 틀은 숨긴다)
   function proxyTop() {
@@ -710,6 +737,60 @@ function installHook(window) {
     toWebSocket: (url) => encodeWsProxyUrl(url, originalBase(), proxyOrigin, originalOrigin),
   });
   Object.defineProperty(window, '__proxy', { value: api, enumerable: false, configurable: false, writable: false });
+
+  // ---------------------------------------------------------------------------
+  // 같은 origin 의 다른 창(빈 iframe, window.open('') 팝업)에도 바꾼 함수를 적용
+  // ---------------------------------------------------------------------------
+  const adopted = new WeakSet();
+  const ownerIn = (win, path) => (path === '' ? win : win[path]?.prototype);
+
+  function adoptWindow(win) {
+    try {
+      if (!win || win === window || adopted.has(win)) return;
+      // 자기 hook 이 이미 설치된 프록시 문서(/p/... 를 연 iframe)는 그대로. 다른 origin 이면 여기서 예외
+      if (win.__proxy || !win.document) return;
+    } catch {
+      return;
+    }
+    adopted.add(win);
+    for (const { path, prop } of patched) {
+      try {
+        const desc = Object.getOwnPropertyDescriptor(ownerIn(window, path), prop);
+        const target = ownerIn(win, path);
+        if (desc && target) Object.defineProperty(target, prop, desc);
+      } catch { /* 바꿀 수 없는 속성은 건너뜀 */ }
+    }
+  }
+
+  // iframe.contentWindow / contentDocument 로 꺼내는 순간 적용 (동기: 꺼내자마자 쓰는 코드 대비)
+  for (const iface of ['HTMLIFrameElement', 'HTMLFrameElement', 'HTMLObjectElement']) {
+    patchAccessor(window[iface]?.prototype, 'contentWindow', {
+      get(getter) {
+        const w = getter.call(this);
+        adoptWindow(w);
+        return w;
+      },
+    });
+    patchAccessor(window[iface]?.prototype, 'contentDocument', {
+      get(getter) {
+        const d = getter.call(this);
+        if (d) adoptWindow(d.defaultView);
+        return d;
+      },
+    });
+  }
+  // window[0], frames[0] 처럼 요소를 거치지 않는 접근 대비: iframe 이 문서에 들어오면 바로 적용
+  const adoptFramesIn = (node) => {
+    if (node.nodeType !== 1) return;
+    const tag = tagOf(node);
+    if (tag === 'iframe' || tag === 'frame') node.contentWindow;
+    else if (node.querySelectorAll) for (const f of node.querySelectorAll('iframe, frame')) f.contentWindow;
+  };
+  if (typeof window.MutationObserver === 'function') {
+    new window.MutationObserver((records) => {
+      for (const r of records) for (const n of r.addedNodes) adoptFramesIn(n);
+    }).observe(document, { childList: true, subtree: true });
+  }
 
   // ---------------------------------------------------------------------------
   // 서비스 워커 등록 (4단계)

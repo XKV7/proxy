@@ -108,6 +108,18 @@ function createSite(name) {
         req.on('end', () => json({ method: req.method, type: req.headers['content-type'] ?? null, body }));
         return;
       }
+      case '/pristine':
+        // 숨긴 iframe 의 "깨끗한" 함수를 꺼내 쓰는 사이트 (함수 바꿔치기를 피하려는 큰 사이트들의 방식)
+        return html(`<p id="out"></p><script>
+  const f = document.createElement('iframe');
+  f.style.display = 'none';
+  document.body.appendChild(f);
+  const clean = f.contentWindow;
+  clean.History.prototype.pushState.call(history, null, '', '/after-push?q=1');
+  clean.fetch.call(window, '/api/data').then((r) => r.json())
+    .then((d) => { document.getElementById('out').textContent = location.pathname + location.search + ' | ' + d.value; })
+    .catch((e) => { document.getElementById('out').textContent = 'ERROR ' + e; });
+</script>`);
       case '/request-object':
         // fetch(new Request(url, { method: 'POST', body })) 형태 (유튜브 등 큰 사이트의 네트워크 라이브러리가 씀)
         return html(`<p id="out"></p><script>
@@ -438,6 +450,16 @@ describe('B. 브라우저 (Playwright)', { skip: chromium ? false : 'playwright 
     await page.goto(`${browserProxyUrl}/p/${A}/request-object`);
     await page.waitForFunction(() => document.getElementById('out').textContent);
     assert.equal(await page.textContent('#out'), JSON.stringify({ method: 'POST', type: 'application/json', body: '{"a":1}' }));
+    await page.goto(`${browserProxyUrl}/p/${A}/app`);
+    await page.waitForFunction(() => document.getElementById('fetched')?.textContent);
+  });
+
+  test('숨긴 iframe 에서 꺼낸 pushState / fetch 도 프록시 안에서 동작', async () => {
+    await page.goto(`${browserProxyUrl}/p/${A}/pristine`);
+    await page.waitForFunction(() => document.getElementById('out').textContent);
+    // 페이지 JS 의 location 은 AST 변환으로 원본 기준
+    assert.equal(await page.textContent('#out'), '/after-push?q=1 | data-from-A');
+    assert.equal(page.url(), `${browserProxyUrl}/p/${A}/after-push?q=1`);
     await page.goto(`${browserProxyUrl}/p/${A}/app`);
     await page.waitForFunction(() => document.getElementById('fetched')?.textContent);
   });
