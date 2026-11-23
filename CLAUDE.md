@@ -19,7 +19,7 @@
 ## 폴더 구조
 ```
 src/
-  server/      서버 (index.js, proxy.js, headers.js, charset.js, cookies.js, hook-bundle.js, ws.js)
+  server/      서버 (index.js, proxy.js, headers.js, charset.js, cookies.js, hook-bundle.js, js-cache.js, ws.js)
   rewrite/     html.js, css.js, js.js (AST 변환)
   client/      sw.js, hook.js (브라우저에서 실행)
   shared/      url.js

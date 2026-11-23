@@ -423,3 +423,118 @@ test('덮어쓴 함수의 toString()/name/length가 원래 함수와 같음', ()
   // 훅과 무관한 함수는 원래 소스 그대로
   assert.equal(ts(function hello() { return 1; }), 'function hello() { return 1; }');
 });
+
+// ---------------------------------------------------------------------------
+// 6단계: js.js 변환 결과가 부르는 __proxy.get/set/top/parent/rewrite
+// ---------------------------------------------------------------------------
+import { buildRewriterScript } from '../src/server/hook-bundle.js';
+import { rewriteJs } from '../src/rewrite/js.js';
+
+let rewriterBundle;
+before(async () => {
+  rewriterBundle = await buildRewriterScript();
+});
+// 변환기 번들을 미리 넣어 두면 hook 이 동기 XHR 없이 바로 쓴다 (window[Symbol.for('proxy.rewriter')])
+const setupWithRewriter = (opts = {}) => setup({ ...opts, beforeHook: (w) => w.eval(rewriterBundle) });
+
+test('__proxy.get: 창/문서의 location/top/parent는 가짜, 나머지는 그대로', () => {
+  const { w, d } = setup();
+  const P = w.__proxy;
+  assert.equal(P.get(w, 'location'), P.location);
+  assert.equal(P.get(w, 'loc' + 'ation').href, `${SITE}/dir/page?x=1`);
+  assert.equal(P.get(d, 'location'), P.location);
+  assert.equal(P.get(w, 'top'), w);
+  assert.equal(P.get({ location: 'mine' }, 'location'), 'mine');
+  assert.equal(P.get([10, 20], 1), 20);
+  assert.equal(P.get({ a: 1 }, { toString: () => 'a' }), 1);
+  const sym = Symbol('s');
+  assert.equal(P.get({ [sym]: 3 }, sym), 3);
+  assert.throws(() => P.get(null, 'x'), { name: 'TypeError' }); // jsdom 창(다른 realm)의 TypeError
+});
+
+test('__proxy.set: location 대입은 가짜 location 으로, 나머지는 일반 대입 (읽기 전용은 조용히 무시)', () => {
+  const { w } = setup();
+  const P = w.__proxy;
+  const o = {};
+  assert.equal(P.set(o, 'k', 1), 1);
+  assert.equal(o.k, 1);
+  P.set(w, 'location', '#moved'); // jsdom 은 해시 이동만 지원
+  assert.equal(w.location.hash, '#moved');
+  const frozen = Object.freeze({ a: 1 });
+  assert.equal(P.set(frozen, 'a', 2), 2);
+  assert.equal(frozen.a, 1);
+  assert.equal(P.set('str', 'x', 1), 1);
+  assert.throws(() => P.set(undefined, 'x', 1), { name: 'TypeError' });
+});
+
+test('__proxy.top / parent: 최상위 창이면 자기 자신, __proxy.location 대입', () => {
+  const { w } = setup();
+  assert.equal(w.__proxy.top, w);
+  assert.equal(w.__proxy.parent, w);
+  w.__proxy.location = '#via-setter';
+  assert.equal(w.location.hash, '#via-setter');
+});
+
+test('서버에서 변환한 코드를 실행하면 원본 주소를 본다 (window["loc"+"ation"] 포함)', () => {
+  const { w, d } = setup({ url: `${PAGE}#start` });
+  w.eval(rewriteJs(`
+    document.title = location.href + ' | ' + window['loc' + 'ation'].host + ' | ' + (top === window) + ' | ' + document.location.pathname;
+    window['loc' + 'ation'].hash = 'set-by-computed';
+  `));
+  assert.equal(d.title, `${SITE}/dir/page?x=1#start | www.example.com | true | /dir/page`);
+  assert.equal(w.location.hash, '#set-by-computed');
+});
+
+test('__proxy.rewrite: eval / new Function / setTimeout 문자열 코드도 변환', async () => {
+  const timers = [];
+  const { w } = setup({
+    beforeHook: (win) => {
+      win.eval(rewriterBundle);
+      // jsdom(outside-only)은 문자열 타이머를 실행하지 않으므로, 넘겨지는 값을 기록해 확인
+      win.setTimeout = function setTimeout(handler, ms) {
+        timers.push(handler);
+        return 1;
+      };
+    },
+  });
+  // 서버 변환 결과: eval(__proxy.rewrite(code)) — 변환된 eval 코드가 가짜 location 을 본다
+  assert.equal(w.eval(rewriteJs('eval("location.hostname")')), 'www.example.com');
+  assert.equal(w.eval(rewriteJs('new Function("return location.origin")()')), SITE);
+  // 지역 변수에 접근하는 direct eval 이 유지됨
+  assert.equal(w.eval(rewriteJs('(function () { var secret = 42; return eval("secret + 1"); })()')), 43);
+  w.setTimeout('window.__fromTimeout = location.pathname', 0);
+  const fn = () => 1;
+  w.setTimeout(fn, 0);
+  assert.equal(w.eval(timers[0]), '/dir/page'); // 변환된 문자열을 실행하면 원본 경로
+  assert.equal(timers[1], fn); // 함수는 그대로
+  // 바꿀 것이 없는 코드는 그대로
+  assert.equal(w.__proxy.rewrite('1 + 1'), '1 + 1');
+  assert.equal(w.__proxy.rewrite(42), 42);
+});
+
+test('동적 코드: on* 속성, <script> 본문(text/textContent/innerHTML), innerHTML 안의 on*', () => {
+  const { d } = setupWithRewriter();
+  const btn = d.createElement('button');
+  btn.setAttribute('onclick', 'location.href = "/x"; return false;');
+  assert.match(btn.getAttribute('onclick'), /__proxy\.location\.href = "\/x"/);
+  const s1 = d.createElement('script');
+  s1.text = 'top.location = "/a"';
+  assert.match(s1.text, /__proxy\.set\(__proxy\.top, "location", "\/a"\)/);
+  const s2 = d.createElement('script');
+  s2.textContent = 'window.location.reload()';
+  assert.match(s2.textContent, /__proxy\.location\.reload\(\)/);
+  const s3 = d.createElement('script');
+  s3.innerHTML = 'parent.postMessage(1)';
+  assert.match(s3.textContent, /__proxy\.parent\.postMessage/);
+  const json = d.createElement('script');
+  json.setAttribute('type', 'application/json');
+  json.textContent = '{"location": [1]}';
+  assert.equal(json.textContent, '{"location": [1]}');
+  const box = d.createElement('div');
+  box.innerHTML = '<a onclick="location.assign(\'/y\')">y</a>';
+  assert.match(box.firstChild.getAttribute('onclick'), /__proxy\.location\.assign/);
+  // 일반 텍스트 노드의 textContent 는 그대로
+  const p = d.createElement('p');
+  p.textContent = 'location.href';
+  assert.equal(p.textContent, 'location.href');
+});

@@ -117,6 +117,58 @@ function installHook(window) {
   // 네트워크 API
   // ---------------------------------------------------------------------------
   const nativeFetch = window.fetch?.bind(window);
+  const nativeXhrOpen = window.XMLHttpRequest?.prototype.open;
+  const nativeEval = window.eval;
+
+  // ---------------------------------------------------------------------------
+  // 런타임 코드 변환 (eval, new Function, setTimeout 문자열, on* 속성, 동적 <script> 텍스트)
+  // 변환기(acorn + astring + js.js, 약 300KB)는 실제로 필요할 때 한 번만 동기로 받아 온다.
+  // eval 은 동기 API라서 비동기로 기다릴 수 없기 때문이다.
+  // ---------------------------------------------------------------------------
+  const REWRITER_KEY = Symbol.for('proxy.rewriter');
+  // 이 단어들이 없으면 변환할 것이 없으므로 변환기를 불러오지 않는다 (js.js의 QUICK_CHECK와 같은 기준)
+  const CODE_HINT = /location|top|parent|eval|Function|\[|import|export/;
+  let rewriterFailed = false;
+
+  function loadRewriter() {
+    if (window[REWRITER_KEY]) return window[REWRITER_KEY];
+    if (rewriterFailed || !nativeXhrOpen) return null;
+    try {
+      const xhr = new window.XMLHttpRequest();
+      nativeXhrOpen.call(xhr, 'GET', `${CLIENT_PREFIX}rewriter.js`, false);
+      xhr.send();
+      // 간접 eval: 전역 스코프에서 평가. 번들이 window[REWRITER_KEY] 에 자신을 등록한다
+      if (xhr.status === 200) (0, nativeEval)(xhr.responseText);
+    } catch (err) {
+      console.warn('[proxy] 코드 변환기를 불러오지 못했습니다:', err);
+    }
+    if (!window[REWRITER_KEY]) rewriterFailed = true;
+    return window[REWRITER_KEY] ?? null;
+  }
+
+  /** 문자열 코드를 변환. 변환기를 못 쓰면 원본 그대로 */
+  function rewriteCode(code, options = {}) {
+    if (typeof code !== 'string' || !CODE_HINT.test(code)) return code;
+    const rewriter = loadRewriter();
+    return rewriter ? rewriter.rewriteJs(code, { sourceType: 'script', base: originalBase(), ...options }) : code;
+  }
+  function rewriteFunctionArgs(args) {
+    const body = args[args.length - 1];
+    if (typeof body !== 'string' || !CODE_HINT.test(body)) return args;
+    const rewriter = loadRewriter();
+    return rewriter ? rewriter.rewriteFunctionArgs(args, { base: originalBase() }) : args;
+  }
+  /** <script> 요소의 본문으로 넣는 코드 */
+  function rewriteScriptText(el, code) {
+    const kind = classifyScriptType(el.getAttribute('type'));
+    return kind ? rewriteCode(String(code), { sourceType: kind }) : code;
+  }
+
+  for (const name of ['setTimeout', 'setInterval']) {
+    patchMethod(window, name, function (original, handler, ...rest) {
+      return original.call(this ?? window, typeof handler === 'string' ? rewriteCode(handler) : handler, ...rest);
+    });
+  }
 
   patchMethod(window, 'fetch', function (fetch, input, init) {
     if (typeof window.Request === 'function' && input instanceof window.Request) {
@@ -211,6 +263,7 @@ function installHook(window) {
   patchMethod(window.Element.prototype, 'setAttribute', function (setAttribute, name, value) {
     const attr = String(name).toLowerCase();
     if (attr === 'integrity') return undefined;
+    if (isEventHandlerAttribute(attr)) return setAttribute.call(this, name, rewriteCode(String(value), { handler: true }));
     return setAttribute.call(this, name, convertAttr(this, attr, value));
   });
   patchMethod(window.Element.prototype, 'setAttributeNS', function (setAttributeNS, ns, name, value) {
@@ -221,7 +274,7 @@ function installHook(window) {
   // innerHTML/outerHTML 대입, insertAdjacentHTML: 브라우저 파서로 <template>에 파싱(스크립트 실행/로딩 없음)
   // -> URL 속성 변환 -> 다시 직렬화해서 원래 setter에 넘긴다
   const innerHTMLDesc = Object.getOwnPropertyDescriptor(window.Element.prototype, 'innerHTML');
-  const URL_ATTR_HINT = /\b(?:src|href|action|formaction|poster|data|srcset|imagesrcset|integrity)\s*=/i;
+  const URL_ATTR_HINT = /\b(?:src|href|action|formaction|poster|data|srcset|imagesrcset|integrity|on\w+)\s*=/i;
   const RAW_TEXT = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'noscript', 'iframe', 'noembed', 'noframes', 'plaintext']);
 
   function rewriteHtmlString(html) {
@@ -237,7 +290,9 @@ function installHook(window) {
       for (const { name, localName } of [...el.attributes]) {
         const attr = (localName || name).toLowerCase();
         if (attr === 'integrity') el.removeAttribute(name);
-        else if (isUrlAttribute(tagOf(el), attr)) {
+        else if (isEventHandlerAttribute(attr)) {
+          nativeSetAttribute.call(el, name, rewriteCode(el.getAttribute(name), { handler: true }));
+        } else if (isUrlAttribute(tagOf(el), attr)) {
           nativeSetAttribute.call(el, name, convertAttr(el, attr, el.getAttribute(name)));
         }
       }
@@ -247,7 +302,25 @@ function installHook(window) {
 
   patchAccessor(window.Element.prototype, 'innerHTML', {
     set(setter, value) {
-      setter.call(this, RAW_TEXT.has(tagOf(this)) ? value : rewriteHtmlString(value));
+      const tag = tagOf(this);
+      if (tag === 'script') setter.call(this, rewriteScriptText(this, value));
+      else setter.call(this, RAW_TEXT.has(tag) ? value : rewriteHtmlString(value));
+    },
+  });
+  // 동적으로 만든 <script>의 본문: script.text = ..., script.textContent = ..., script.innerText = ...
+  patchAccessor(window.HTMLScriptElement?.prototype, 'text', {
+    set(setter, value) {
+      setter.call(this, rewriteScriptText(this, value));
+    },
+  });
+  patchAccessor(window.Node.prototype, 'textContent', {
+    set(setter, value) {
+      setter.call(this, tagOf(this) === 'script' && value != null ? rewriteScriptText(this, value) : value);
+    },
+  });
+  patchAccessor(window.HTMLElement.prototype, 'innerText', {
+    set(setter, value) {
+      setter.call(this, tagOf(this) === 'script' && value != null ? rewriteScriptText(this, value) : value);
     },
   });
   patchAccessor(window.Element.prototype, 'outerHTML', {
@@ -492,11 +565,95 @@ function installHook(window) {
   // ---------------------------------------------------------------------------
   // window.__proxy
   // ---------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // js.js(AST 변환)가 만든 코드가 부르는 함수들
+  // ---------------------------------------------------------------------------
+  const SPECIAL_KEYS = new Set(['location', 'top', 'parent']);
+  const isWindowLike = (o) => {
+    try {
+      return o !== null && typeof o === 'object' && o.window === o;
+    } catch {
+      return false;
+    }
+  };
+  const apiOf = (win) => {
+    try {
+      return win?.__proxy;
+    } catch {
+      return undefined;
+    }
+  };
+  // obj가 창/문서면 그 창의 __proxy (다른 프록시 iframe/팝업이면 그쪽 것)
+  const apiForTarget = (obj, key) => {
+    if (isWindowLike(obj)) return apiOf(obj);
+    if (key === 'location' && obj !== null && typeof obj === 'object' && obj.nodeType === 9) return apiOf(obj.defaultView);
+    return undefined;
+  };
+
+  /** obj[key] 읽기. key가 location/top/parent이고 obj가 창/문서면 가짜 객체 */
+  function proxyGet(obj, key) {
+    if (typeof key !== 'string') {
+      // 숫자/심볼 등은 바로 (배열 인덱스 같은 흔한 경우를 빠르게)
+      if (key === null || (typeof key !== 'object' && typeof key !== 'function')) return obj[key];
+      key = String(key);
+    }
+    if (!SPECIAL_KEYS.has(key)) return obj[key];
+    const target = apiForTarget(obj, key);
+    return target ? target[key] : obj[key];
+  }
+
+  /** obj[key] = value. location 대입은 가짜 location으로 (프록시 안에서 이동) */
+  function proxySet(obj, key, value) {
+    if (key !== null && typeof key === 'object') key = String(key);
+    if (key === 'location') {
+      const target = apiForTarget(obj, key);
+      if (target) {
+        target.location = value;
+        return value;
+      }
+    }
+    if (obj === null || obj === undefined) obj[key] = value; // 원래와 같은 TypeError
+    // 원본 코드가 비엄격 모드일 수 있으므로 읽기 전용 속성 대입은 예외 없이 무시 (Reflect.set)
+    if (typeof obj === 'object' || typeof obj === 'function') Reflect.set(obj, key, value);
+    return value;
+  }
+
+  // top/parent: 위쪽 창도 프록시 페이지일 때만 그 창을 보여 준다 (프록시 밖의 틀은 숨긴다)
+  function proxyTop() {
+    let w = window;
+    for (;;) {
+      let p;
+      try {
+        p = w.parent;
+      } catch {
+        break;
+      }
+      if (!p || p === w || !apiOf(p)) break;
+      w = p;
+    }
+    return w;
+  }
+  function proxyParent() {
+    const p = window.parent;
+    // parent = x 처럼 전역 변수로 쓰는 옛 코드는 진짜 window.parent를 바꿔 두므로 그 값을 그대로
+    if (!isWindowLike(p)) return p;
+    return p !== window && apiOf(p) ? p : window;
+  }
+
   const api = Object.freeze({
     get url() { return currentHref(); },
     get origin() { return originalOrigin; },
     proxyOrigin,
-    location: fakeLocation,
+    get location() { return fakeLocation; },
+    set location(value) { fakeLocation.href = value; },
+    get top() { return proxyTop(); },
+    get parent() { return proxyParent(); },
+    get: proxyGet,
+    set: proxySet,
+    /** eval 코드 변환 (js.js가 eval(x) -> eval(__proxy.rewrite(x)) 로 바꿈) */
+    rewrite: (code) => rewriteCode(code),
+    /** new Function 인자 변환 */
+    rewriteFunctionArgs,
     /** 원본 URL(상대/절대) -> 프록시 경로 */
     toProxy,
     /** 프록시 URL -> 원본 URL (프록시 URL이 아니면 null) */

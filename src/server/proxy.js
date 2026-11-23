@@ -6,6 +6,7 @@ import { buildRequestHeaders, buildResponseHeaders } from './headers.js';
 import { decodeBody } from './charset.js';
 import { rewriteHtml } from '../rewrite/html.js';
 import { rewriteCss } from '../rewrite/css.js';
+import { JsCache } from './js-cache.js';
 
 const debug = process.env.DEBUG === '1' ? (...a) => console.log('[proxy]', ...a) : () => {};
 
@@ -14,19 +15,36 @@ export const DEFAULT_TIMEOUT_MS = 15_000;
 export const DOCUMENT_COOKIE_HEADER = 'x-proxy-document-cookie';
 
 // Content-Type(MIME) -> 바디 변환기. 여기 없는 타입은 그대로 스트리밍한다.
-const REWRITERS = {
-  'text/html': { kind: 'html', rewrite: (text, url, { charset, cookie }) => rewriteHtml(text, url, { charset, cookie }) },
-  'text/css': { kind: 'css', rewrite: (text, url) => rewriteCss(text, url) },
+const jsRewriter = {
+  kind: 'js',
+  // 외부 JS 파일: 모듈 여부는 파싱으로 판별, import 경로는 이 파일 URL 기준, Worker 대비 prelude 포함
+  rewrite: (text, url, { jsCache }) => jsCache.rewrite(text, { sourceType: 'auto', base: url, prelude: true }),
 };
+const REWRITERS = {
+  'text/html': {
+    kind: 'html',
+    rewrite: (text, url, { charset, cookie, jsCache }) =>
+      rewriteHtml(text, url, { charset, cookie, rewriteJs: (code, opts) => jsCache.rewriteSync(code, opts) }),
+  },
+  'text/css': { kind: 'css', rewrite: (text, url) => rewriteCss(text, url) },
+  'text/javascript': jsRewriter,
+  'application/javascript': jsRewriter,
+  'application/x-javascript': jsRewriter,
+  'text/ecmascript': jsRewriter,
+  'application/ecmascript': jsRewriter,
+};
+
+const defaultJsCache = new JsCache();
 
 /**
  * /p/* 요청 처리.
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
- * @param {{ timeoutMs?: number, jar?: import('./cookies.js').CookieJar }} [options]
+ * @param {{ timeoutMs?: number, jar?: import('./cookies.js').CookieJar, jsCache?: JsCache }} [options]
  *   jar: 이 브라우저 세션의 사이트 쿠키 저장소. 없으면 쿠키를 주고받지 않는다.
+ *   jsCache: JS 변환 결과 캐시. 없으면 메모리 전용 캐시를 쓴다.
  */
-export async function handleProxy(req, res, { timeoutMs = DEFAULT_TIMEOUT_MS, jar } = {}) {
+export async function handleProxy(req, res, { timeoutMs = DEFAULT_TIMEOUT_MS, jar, jsCache = defaultJsCache } = {}) {
   const target = decodeProxyUrl(req.url);
   if (!target) {
     return sendError(res, 400, '잘못된 URL', `프록시할 수 없는 주소입니다: ${req.url}`);
@@ -97,7 +115,7 @@ export async function handleProxy(req, res, { timeoutMs = DEFAULT_TIMEOUT_MS, ja
       const { text, charset } = decodeBody(buf, contentType, rewriter.kind);
       // 이 응답의 Set-Cookie까지 반영된 값 (위에서 저장함)
       const cookie = jar ? jar.getCookieString(target, { http: false }) : '';
-      output = Buffer.from(rewriter.rewrite(text, target, { charset, cookie }), 'utf8');
+      output = Buffer.from(await rewriter.rewrite(text, target, { charset, cookie, jsCache }), 'utf8');
       debug('변환 완료', rewriter.kind, charset, `${buf.length}B -> ${output.length}B`);
     } catch (err) {
       if (res.destroyed) return;

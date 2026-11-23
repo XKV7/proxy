@@ -4,7 +4,8 @@ import { pathToFileURL } from 'node:url';
 import { PROXY_PREFIX } from '../shared/url.js';
 import { handleProxy, sendError } from './proxy.js';
 import { CookieStore, handleCookieApi } from './cookies.js';
-import { buildHookScript } from './hook-bundle.js';
+import { buildHookScript, buildRewriterScript } from './hook-bundle.js';
+import { JsCache } from './js-cache.js';
 
 const ROOT = new URL('../../', import.meta.url);
 
@@ -20,20 +21,23 @@ const STATIC_FILES = {
   '/__proxy/url.js': { file: 'src/shared/url.js', type: JS },
   // url.js + hook.js 를 합친 일반 스크립트 (hook-bundle.js 참고)
   '/__proxy/hook.js': { build: buildHookScript, type: JS },
+  // 런타임 eval/new Function 코드 변환기 (acorn + astring + js.js). hook.js가 처음 필요할 때 받아 간다
+  '/__proxy/rewriter.js': { build: buildRewriterScript, type: JS },
   // 스크립트 위치(/__proxy/)보다 넓은 scope(/)로 등록하려면 이 헤더가 필요하다
   '/__proxy/sw.js': { file: 'src/client/sw.js', type: JS, headers: { 'service-worker-allowed': '/' } },
 };
 
 /**
- * @param {{ timeoutMs?: number, cookieStore?: CookieStore }} [options]
+ * @param {{ timeoutMs?: number, cookieStore?: CookieStore, jsCache?: JsCache }} [options]
  *   cookieStore: 없으면 메모리 전용 저장소를 만든다
+ *   jsCache: 없으면 메모리 전용 JS 변환 캐시를 만든다
  */
-export function createProxyServer({ timeoutMs, cookieStore = new CookieStore() } = {}) {
+export function createProxyServer({ timeoutMs, cookieStore = new CookieStore(), jsCache = new JsCache() } = {}) {
   const server = http.createServer(async (req, res) => {
     try {
       if (req.url.startsWith(PROXY_PREFIX)) {
         const jar = cookieStore.sessionFor(req, res);
-        return await handleProxy(req, res, { timeoutMs, jar });
+        return await handleProxy(req, res, { timeoutMs, jar, jsCache });
       }
       const pathname = req.url.split('?')[0];
       if (pathname === '/__proxy/cookies') {
@@ -73,7 +77,8 @@ if (isMain) {
       process.exit(0);
     });
   }
-  createProxyServer({ cookieStore }).listen(port, '127.0.0.1', () => {
+  const jsCache = new JsCache({ dir: process.env.JS_CACHE_DIR || new URL('data/js-cache', ROOT).pathname });
+  createProxyServer({ cookieStore, jsCache }).listen(port, '127.0.0.1', () => {
     console.log(`프록시 실행 중: http://localhost:${port}/  (쿠키 저장 파일: ${cookieFile})`);
   });
 }

@@ -257,6 +257,26 @@ export function rewriteSrcset(value, baseOrConvert) {
   return candidates.join(', ');
 }
 
+/**
+ * <script type="..."> -> 'classic' | 'module' | null(JS가 아님: JSON, JSON-LD, importmap, 템플릿 등)
+ * @param {string|undefined|null} type type 속성 값 (없으면 undefined/null)
+ */
+export function classifyScriptType(type) {
+  const t = (type ?? '').trim().toLowerCase();
+  if (t === '') return 'classic';
+  if (t === 'module') return 'module';
+  // HTML 명세의 JavaScript MIME 타입 목록 (매개변수 없는 형태)
+  if (/^(?:text|application)\/(?:x-)?(?:java|ecma)script$|^text\/(?:jscript|livescript)$|^text\/javascript1\.[0-5]$/.test(t)) {
+    return 'classic';
+  }
+  return null;
+}
+
+/** onclick, onload 같은 이벤트 핸들러 속성인가 */
+export function isEventHandlerAttribute(name) {
+  return name.length > 2 && name.startsWith('on');
+}
+
 function parseHttpUrl(value) {
   try {
     const u = new URL(value);

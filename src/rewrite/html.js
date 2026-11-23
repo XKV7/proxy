@@ -1,7 +1,10 @@
 // HTML 안의 URL 속성들을 프록시 경로로 바꾼다. (parse5로 파싱 -> 트리 수정 -> 직렬화)
 import { parse, serialize } from 'parse5';
-import { proxify, proxifyRefresh, resolve, rewriteAttribute, rewriteSrcset } from '../shared/url.js';
+import {
+  proxify, proxifyRefresh, resolve, rewriteAttribute, rewriteSrcset, classifyScriptType, isEventHandlerAttribute,
+} from '../shared/url.js';
 import { rewriteCss, rewriteInlineStyle } from './css.js';
+import { rewriteJs as defaultRewriteJs } from './js.js';
 
 export const HOOK_SCRIPT_SRC = '/__proxy/hook.js';
 
@@ -11,15 +14,16 @@ export { rewriteSrcset };
 /**
  * @param {string} html 디코딩된 HTML 문자열
  * @param {string} documentUrl 이 문서의 원본 URL
- * @param {{ charset?: string, cookie?: string }} [options]
+ * @param {{ charset?: string, cookie?: string, rewriteJs?: Function }} [options]
  *   charset: 원본 문서의 문자 인코딩 (예: 'euc-kr')
  *   cookie: 이 문서에서 document.cookie 로 보일 쿠키 문자열 (HttpOnly 제외). hook.js가 초기값으로 쓴다
+ *   rewriteJs: (code, options) => code. 인라인 스크립트/이벤트 속성 변환기 (서버는 캐시를 붙여 넘김)
  * @returns {string}
  */
-export function rewriteHtml(html, documentUrl, { charset = 'utf-8', cookie = '' } = {}) {
+export function rewriteHtml(html, documentUrl, { charset = 'utf-8', cookie = '', rewriteJs = defaultRewriteJs } = {}) {
   const document = parse(html);
   const base = findBase(document, documentUrl);
-  const ctx = { base, charset: charset.toLowerCase(), baseSeen: false, convert: (u) => proxify(u, base) };
+  const ctx = { base, charset: charset.toLowerCase(), baseSeen: false, convert: (u) => proxify(u, base), rewriteJs };
   walk(document, (node) => rewriteNode(node, ctx));
   injectHook(document, cookie);
   return serialize(document);
@@ -43,6 +47,15 @@ function findBase(document, documentUrl) {
 function rewriteNode(node, ctx) {
   if (node.nodeName === '#text' && node.parentNode?.tagName === 'style') {
     node.value = rewriteCss(node.value, ctx.base);
+    return;
+  }
+  if (node.nodeName === '#text' && node.parentNode?.tagName === 'script') {
+    // src가 있는 스크립트의 본문은 실행되지 않는다. JSON/JSON-LD/importmap/템플릿은 JS가 아님
+    const script = node.parentNode;
+    const kind = classifyScriptType(getAttr(script, 'type'));
+    if (kind && getAttr(script, 'src') === undefined) {
+      node.value = ctx.rewriteJs(node.value, { sourceType: kind === 'module' ? 'module' : 'script', base: ctx.base });
+    }
     return;
   }
   if (!node.attrs) return;
@@ -76,6 +89,9 @@ function rewriteNode(node, ctx) {
       }
     } else if (name === 'style') {
       attr.value = rewriteInlineStyle(attr.value, ctx.base);
+    } else if (isEventHandlerAttribute(name)) {
+      // onclick="location.href='/x'" 등: 함수 본문으로 파싱 (return 허용)
+      attr.value = ctx.rewriteJs(attr.value, { sourceType: 'script', handler: true });
     } else {
       attr.value = rewriteAttribute(tag, name, attr.value, ctx.convert);
     }
