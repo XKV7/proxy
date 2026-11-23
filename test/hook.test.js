@@ -540,3 +540,44 @@ test('동적 코드: on* 속성, <script> 본문(text/textContent/innerHTML), in
   p.textContent = 'location.href';
   assert.equal(p.textContent, 'location.href');
 });
+
+// ---------------------------------------------------------------------------
+// window.opener / window.close(): 프록시 밖의 창이 연 탭은 사용자가 직접 연 탭처럼
+// ---------------------------------------------------------------------------
+function setupWithOpener(opener) {
+  let closed = 0;
+  const ctx = setup({
+    beforeHook: (w) => {
+      Object.defineProperty(w, 'opener', { get: () => opener, set() {}, configurable: true });
+      w.close = function close() {
+        closed++;
+      };
+    },
+  });
+  return { ...ctx, closedCount: () => closed };
+}
+
+test('프록시 밖의 창(Codespaces 편집기 등)이 연 탭: opener 숨김, window.close() 무시', () => {
+  const outsider = {}; // __proxy 가 없는 창 (다른 origin 편집기, 시작 페이지 등)
+  const { w, closedCount } = setupWithOpener(outsider);
+  assert.equal(w.opener, null);
+  w.close();
+  assert.equal(closedCount(), 0);
+});
+
+test('프록시된 페이지가 연 팝업: opener 보이고 window.close() 동작 (로그인 팝업 흐름)', () => {
+  const proxiedParent = { __proxy: { url: 'https://site.com/' } };
+  const { w, closedCount } = setupWithOpener(proxiedParent);
+  assert.equal(w.opener, proxiedParent);
+  w.close();
+  assert.equal(closedCount(), 1);
+});
+
+test('opener 없이 연 탭: opener 는 null, close() 는 브라우저 기본 동작에 맡기지 않고 무시', () => {
+  const { w, closedCount } = setupWithOpener(null);
+  assert.equal(w.opener, null);
+  w.close();
+  assert.equal(closedCount(), 0);
+  // native 처럼 보임
+  assert.equal(w.close.name, 'close');
+});
