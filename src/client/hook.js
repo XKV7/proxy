@@ -618,6 +618,27 @@ function installHook(window) {
     return value;
   }
 
+  // window.opener / window.close():
+  // 프록시 탭이 프록시 밖의 창(예: Codespaces 편집기가 포트를 새 탭으로 연 경우)에서 스크립트로 열리면,
+  // 사이트는 자기가 팝업으로 열렸다고 착각해 opener에 결과를 넘기고 window.close()로 탭을 닫는다.
+  // 원래 브라우저에서 사용자가 직접 연 탭처럼 보이도록, 나를 연 창이 프록시된 페이지일 때만
+  // opener를 보여 주고 close()를 허용한다. (top/parent와 같은 원칙)
+  let realOpener = null;
+  try {
+    realOpener = window.opener;
+  } catch { /* 접근 불가 */ }
+  const openedByProxiedPage = !!(realOpener && apiOf(realOpener));
+  patchAccessor(window, 'opener', {
+    get(getter) {
+      const o = getter.call(this);
+      return o && apiOf(o) ? o : null;
+    },
+  });
+  patchMethod(window, 'close', function (close, ...args) {
+    if (this === window && !openedByProxiedPage) return undefined;
+    return close.apply(this, args);
+  });
+
   // top/parent: 위쪽 창도 프록시 페이지일 때만 그 창을 보여 준다 (프록시 밖의 틀은 숨긴다)
   function proxyTop() {
     let w = window;
