@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Web Proxy</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 6rem auto; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.5rem; }
+  form { display: flex; gap: .5rem; }
+  input { flex: 1; padding: .6rem .8rem; font-size: 1rem; border: 1px solid #bbb; border-radius: 6px; }
+  button { padding: .6rem 1.2rem; font-size: 1rem; border: 0; border-radius: 6px; background: #0366d6; color: #fff; cursor: pointer; }
+  .error { color: #c00; min-height: 1.5em; }
+</style>
+</head>
+<body>
+<h1>Web Proxy (학습용)</h1>
+<form id="go">
+  <input id="url" type="text" placeholder="example.com" autofocus autocomplete="off" spellcheck="false">
+  <button type="submit">이동</button>
+</form>
+<p class="error" id="error"></p>
+
+<script type="module">
+  import { encodeProxyUrl } from '/__proxy/url.js';
+
+  const form = document.getElementById('go');
+  const input = document.getElementById('url');
+  const error = document.getElementById('error');
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    let value = input.value.trim();
+    if (!value) return;
+    if (!/^https?:\/\//i.test(value)) value = 'https://' + value;
+    try {
+      location.href = encodeProxyUrl(value);
+    } catch {
+      error.textContent = '올바른 URL이 아닙니다.';
+    }
+  });
+</script>
+</body>
+</html>
