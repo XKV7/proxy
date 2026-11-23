@@ -5,6 +5,8 @@
 //   프록시: /p/https://example.com/a/b?x=1
 
 export const PROXY_PREFIX = '/p/';
+// 프록시 자체의 클라이언트 자원 (sw.js, hook.js 등). 원본 사이트 요청으로 바꾸지 않는다.
+export const CLIENT_PREFIX = '/__proxy/';
 
 const ALLOWED_PROTOCOLS = new Set(['http:', 'https:']);
 
@@ -79,6 +81,47 @@ export function proxifyRefresh(content, base) {
   if (!m || !m[3]) return content;
   const [, prefix, quote, url, tail] = m;
   return prefix + quote + proxify(url, base) + quote + tail;
+}
+
+/**
+ * 서비스 워커가 가로챈 요청 URL -> 프록시 URL (절대 URL). 바꿀 필요가 없으면 null.
+ *
+ * - 프록시 origin의 /p/... , /__proxy/... : 이미 프록시 경로 -> null
+ * - 프록시 origin의 그 밖의 경로 (예: 페이지 JS의 fetch('/api/x')가 localhost 기준으로 해석된 것)
+ *     -> 요청을 보낸 페이지(clientUrl, 없으면 referrer)의 원본 사이트 기준으로 해석
+ *     -> 원본 페이지를 알 수 없으면(시작 페이지 등) null
+ * - 다른 origin의 http(s) 요청 (예: fetch('https://api.site.com/x')) -> 그 URL을 프록시 경로로
+ *
+ * @param {string} requestUrl 브라우저가 해석한 요청 URL
+ * @param {{ proxyOrigin: string, clientUrl?: string|null, referrer?: string|null }} context
+ * @returns {string|null}
+ */
+export function rewriteRequestUrl(requestUrl, { proxyOrigin, clientUrl, referrer } = {}) {
+  let req;
+  try {
+    req = new URL(requestUrl);
+  } catch {
+    return null;
+  }
+  if (req.origin === proxyOrigin) {
+    if (req.pathname.startsWith(PROXY_PREFIX) || req.pathname.startsWith(CLIENT_PREFIX)) return null;
+    const page = originalPageUrl(clientUrl, proxyOrigin) ?? originalPageUrl(referrer, proxyOrigin);
+    if (!page) return null;
+    return proxyOrigin + encodeProxyUrl(resolve(req.pathname + req.search, page));
+  }
+  if (!parseHttpUrl(req.href)) return null;
+  return proxyOrigin + encodeProxyUrl(req.href);
+}
+
+/** 프록시 페이지의 URL(http://localhost:8080/p/https://site/page) -> 원본 URL. 아니면 null */
+function originalPageUrl(url, proxyOrigin) {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    return u.origin === proxyOrigin ? decodeProxyUrl(u.pathname + u.search) : null;
+  } catch {
+    return null;
+  }
 }
 
 function parseHttpUrl(value) {

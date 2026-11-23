@@ -28,6 +28,10 @@
   const input = document.getElementById('url');
   const error = document.getElementById('error');
 
+  // 서비스 워커를 미리 등록해 두면 첫 프록시 페이지부터 워커가 제어한다 (새로고침 깜빡임 없음)
+  navigator.serviceWorker?.register('/__proxy/sw.js', { scope: '/', type: 'module', updateViaCache: 'none' })
+    .catch((err) => console.warn('[proxy] 서비스 워커 등록 실패:', err));
+
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     let value = input.value.trim();

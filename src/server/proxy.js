@@ -144,7 +144,7 @@ export function sendError(res, status, title, message) {
 <body>
 <h1>${status} ${escapeHtml(title)}</h1>
 <p>${escapeHtml(message)}</p>
-<p><a href="/">처음으로</a></p>
+<p><a href="/__proxy/">처음으로</a></p>
 </body>
 </html>`;
   res.writeHead(status, {
