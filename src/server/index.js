@@ -3,7 +3,8 @@ import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { PROXY_PREFIX } from '../shared/url.js';
 import { handleProxy, sendError } from './proxy.js';
-import { CookieStore, handleCookieApi } from './cookies.js';
+import { CookieStore, handleCookieApi, handleSessionApi } from './cookies.js';
+import { handleWsUpgrade, rejectUnknownUpgrade } from './ws.js';
 import { buildHookScript, buildRewriterScript } from './hook-bundle.js';
 import { JsCache } from './js-cache.js';
 
@@ -43,6 +44,9 @@ export function createProxyServer({ timeoutMs, cookieStore = new CookieStore(), 
       if (pathname === '/__proxy/cookies') {
         return await handleCookieApi(req, res, cookieStore);
       }
+      if (pathname === '/__proxy/session' || pathname === '/__proxy/session/reset') {
+        return handleSessionApi(req, res, cookieStore);
+      }
       const entry = STATIC_FILES[pathname];
       if (entry && (req.method === 'GET' || req.method === 'HEAD')) {
         const body = entry.build ? Buffer.from(await entry.build()) : await readFile(new URL(entry.file, ROOT));
@@ -60,6 +64,16 @@ export function createProxyServer({ timeoutMs, cookieStore = new CookieStore(), 
       console.error(err);
       sendError(res, 500, '서버 오류', err.message);
     }
+  });
+  // WebSocket: /__proxy/ws?url=... 만 중계
+  server.on('upgrade', (req, socket, head) => {
+    if (new URL(req.url, 'http://localhost').pathname === '/__proxy/ws') handleWsUpgrade(req, socket, head, { cookieStore });
+    else rejectUnknownUpgrade(socket);
+  });
+  // 잘못된 HTTP 요청(파싱 불가 등): 연결만 정리하고 서버는 계속 동작
+  server.on('clientError', (err, socket) => {
+    if (socket.writable && !socket.destroyed) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+    else socket.destroy();
   });
   server.cookieStore = cookieStore;
   return server;

@@ -199,7 +199,7 @@ function installHook(window) {
   patchConstructor('EventSource', ([url, ...rest]) => [toProxy(url), ...rest]);
 
   patchConstructor('WebSocket', ([url, ...rest]) => [
-    encodeWsProxyUrl(url, originalBase(), proxyOrigin) ?? url,
+    encodeWsProxyUrl(url, originalBase(), proxyOrigin, originalOrigin) ?? url,
     ...rest,
   ]);
 
@@ -658,7 +658,7 @@ function installHook(window) {
     toProxy,
     /** 프록시 URL -> 원본 URL (프록시 URL이 아니면 null) */
     fromProxy,
-    toWebSocket: (url) => encodeWsProxyUrl(url, originalBase(), proxyOrigin),
+    toWebSocket: (url) => encodeWsProxyUrl(url, originalBase(), proxyOrigin, originalOrigin),
   });
   Object.defineProperty(window, '__proxy', { value: api, enumerable: false, configurable: false, writable: false });
 

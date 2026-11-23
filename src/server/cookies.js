@@ -278,6 +278,26 @@ export class CookieJar {
     return this.cookies.size;
   }
 
+  /** 모든 쿠키 삭제. 지운 개수를 돌려준다 */
+  clear() {
+    const n = this.cookies.size;
+    this.cookies.clear();
+    if (n) this.onChange();
+    return n;
+  }
+
+  /** 도메인별 쿠키 개수 (만료된 것 제외), 개수가 많은 순 */
+  summary(now = Date.now()) {
+    const byDomain = new Map();
+    for (const c of this.toJSON(now)) {
+      const d = byDomain.get(c.domain) ?? { domain: c.domain, count: 0, httpOnly: 0 };
+      d.count++;
+      if (c.httpOnly) d.httpOnly++;
+      byDomain.set(c.domain, d);
+    }
+    return [...byDomain.values()].sort((a, b) => b.count - a.count || a.domain.localeCompare(b.domain));
+  }
+
   toJSON(now = Date.now()) {
     return [...this.cookies.values()].filter((c) => c.expires === null || c.expires > now);
   }
@@ -339,6 +359,12 @@ export class CookieStore {
     const sid = randomBytes(24).toString('base64url');
     this.sessions.set(sid, this.#newJar([]));
     return sid;
+  }
+
+  /** 요청의 __proxy_sid가 가리키는 기존 세션 (새로 만들지 않음) */
+  existingSession(req) {
+    const sid = readCookieHeader(req.headers.cookie)[SESSION_COOKIE];
+    return sid && this.sessions.has(sid) ? { sid, jar: this.sessions.get(sid) } : null;
   }
 
   /**
@@ -476,4 +502,34 @@ function sendJson(res, status, data) {
     'cache-control': 'no-store',
   });
   res.end(body);
+}
+
+// ---------------------------------------------------------------------------
+// 시작 페이지용 세션 API
+//   GET  /__proxy/session        -> { active, id, cookies, sites: [{ domain, count, httpOnly }] }
+//   POST /__proxy/session/reset  -> 현재 세션의 사이트 쿠키를 모두 삭제 -> { ok, cleared }
+// 세션이 없는 브라우저에는 새 세션을 만들지 않는다.
+// ---------------------------------------------------------------------------
+
+export function handleSessionApi(req, res, store) {
+  const { pathname } = new URL(req.url, 'http://localhost');
+  const session = store.existingSession(req);
+  if (pathname === '/__proxy/session' && req.method === 'GET') {
+    if (!session) return sendJson(res, 200, { active: false, id: null, cookies: 0, sites: [] });
+    const sites = session.jar.summary();
+    return sendJson(res, 200, {
+      active: true,
+      // 전체 ID는 HttpOnly 쿠키로만 다룬다. 화면에는 구분용 앞부분만
+      id: `${session.sid.slice(0, 8)}…`,
+      cookies: sites.reduce((n, s) => n + s.count, 0),
+      sites,
+    });
+  }
+  if (pathname === '/__proxy/session/reset' && req.method === 'POST') {
+    const cleared = session ? session.jar.clear() : 0;
+    debug('쿠키 초기화', cleared);
+    return sendJson(res, 200, { ok: true, cleared });
+  }
+  res.setHeader('allow', pathname === '/__proxy/session' ? 'GET' : 'POST');
+  return sendJson(res, 405, { error: '지원하지 않는 메서드입니다' });
 }

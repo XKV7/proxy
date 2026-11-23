@@ -7,10 +7,18 @@
 <style>
   body { font-family: system-ui, sans-serif; max-width: 640px; margin: 6rem auto; padding: 0 1rem; color: #222; }
   h1 { font-size: 1.5rem; }
+  h2 { font-size: 1.05rem; margin: 0 0 .6rem; }
   form { display: flex; gap: .5rem; }
-  input { flex: 1; padding: .6rem .8rem; font-size: 1rem; border: 1px solid #bbb; border-radius: 6px; }
+  input { flex: 1; min-width: 0; padding: .6rem .8rem; font-size: 1rem; border: 1px solid #bbb; border-radius: 6px; }
   button { padding: .6rem 1.2rem; font-size: 1rem; border: 0; border-radius: 6px; background: #0366d6; color: #fff; cursor: pointer; }
+  button.secondary { background: #eee; color: #a00; padding: .4rem .9rem; font-size: .9rem; }
+  button:disabled { opacity: .5; cursor: default; }
   .error { color: #c00; min-height: 1.5em; }
+  .session { margin-top: 2.5rem; padding: 1rem 1.2rem; border: 1px solid #ddd; border-radius: 8px; background: #fafafa; }
+  .session p { margin: .3rem 0; color: #555; font-size: .92rem; }
+  .session ul { margin: .5rem 0 .8rem; padding-left: 1.2rem; font-size: .9rem; max-height: 14rem; overflow: auto; }
+  .session code { font-size: .85rem; }
+  .muted { color: #888; }
 </style>
 </head>
 <body>
@@ -20,6 +28,14 @@
   <button type="submit">이동</button>
 </form>
 <p class="error" id="error"></p>
+
+<section class="session" aria-labelledby="session-title">
+  <h2 id="session-title">현재 세션</h2>
+  <p id="session-summary" class="muted">불러오는 중…</p>
+  <ul id="session-sites"></ul>
+  <button type="button" class="secondary" id="reset" disabled>쿠키 초기화</button>
+  <p id="reset-result" class="muted"></p>
+</section>
 
 <script type="module">
   import { encodeProxyUrl } from '/__proxy/url.js';
@@ -43,6 +59,47 @@
       error.textContent = '올바른 URL이 아닙니다.';
     }
   });
+
+  // ---- 세션 정보 / 쿠키 초기화 ----
+  const summary = document.getElementById('session-summary');
+  const sites = document.getElementById('session-sites');
+  const reset = document.getElementById('reset');
+  const resetResult = document.getElementById('reset-result');
+
+  async function loadSession() {
+    try {
+      const s = await (await fetch('/__proxy/session', { cache: 'no-store' })).json();
+      sites.replaceChildren();
+      if (!s.active) {
+        summary.textContent = '아직 세션이 없습니다. 사이트에 처음 접속하면 만들어집니다.';
+        reset.disabled = true;
+        return;
+      }
+      summary.replaceChildren('세션 ', Object.assign(document.createElement('code'), { textContent: s.id }), ` · 저장된 쿠키 ${s.cookies}개 (사이트 ${s.sites.length}곳)`);
+      for (const site of s.sites) {
+        const li = document.createElement('li');
+        li.textContent = `${site.domain} — ${site.count}개${site.httpOnly ? ` (HttpOnly ${site.httpOnly})` : ''}`;
+        sites.append(li);
+      }
+      reset.disabled = s.cookies === 0;
+    } catch {
+      summary.textContent = '세션 정보를 불러오지 못했습니다.';
+    }
+  }
+
+  reset.addEventListener('click', async () => {
+    if (!confirm('이 브라우저 세션에 저장된 모든 사이트 쿠키를 지울까요? (사이트 로그인이 풀립니다)')) return;
+    reset.disabled = true;
+    try {
+      const r = await (await fetch('/__proxy/session/reset', { method: 'POST' })).json();
+      resetResult.textContent = `쿠키 ${r.cleared}개를 지웠습니다.`;
+    } catch {
+      resetResult.textContent = '초기화에 실패했습니다.';
+    }
+    loadSession();
+  });
+
+  loadSession();
 </script>
 </body>
 </html>

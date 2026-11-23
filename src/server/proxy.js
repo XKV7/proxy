@@ -63,6 +63,8 @@ export async function handleProxy(req, res, { timeoutMs = DEFAULT_TIMEOUT_MS, ja
 
   const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
   const requestHeaders = buildRequestHeaders(req.headers, target);
+  // 부분 요청(영상 탐색 등)은 압축되지 않은 원래 바이트 범위를 받아야 한다
+  if (requestHeaders.range) requestHeaders['accept-encoding'] = 'identity';
   const cookie = jar?.getCookieString(target);
   if (cookie) requestHeaders.cookie = cookie;
   let upstream;
@@ -102,6 +104,7 @@ export async function handleProxy(req, res, { timeoutMs = DEFAULT_TIMEOUT_MS, ja
   debug(upstream.status, rewriter ? rewriter.kind : 'stream', target);
 
   if (!upstream.body || req.method === 'HEAD') {
+    keepContentLength(upstream, headers);
     res.writeHead(upstream.status, headers);
     res.end();
     return;
@@ -129,6 +132,8 @@ export async function handleProxy(req, res, { timeoutMs = DEFAULT_TIMEOUT_MS, ja
     return;
   }
 
+  // 원본이 압축하지 않았으면 바디가 그대로이므로 길이를 유지한다 (영상 탐색, 다운로드 진행률에 필요)
+  keepContentLength(upstream, headers);
   res.writeHead(upstream.status, headers);
   try {
     await pipeline(Readable.fromWeb(upstream.body), res);
@@ -137,6 +142,12 @@ export async function handleProxy(req, res, { timeoutMs = DEFAULT_TIMEOUT_MS, ja
     debug('스트리밍 중단', target, err.code || err.message);
     res.destroy();
   }
+}
+
+function keepContentLength(upstream, headers) {
+  const encoding = upstream.headers.get('content-encoding');
+  const length = upstream.headers.get('content-length');
+  if (length !== null && (!encoding || encoding.toLowerCase() === 'identity')) headers['content-length'] = length;
 }
 
 function mimeType(contentType) {
@@ -178,6 +189,9 @@ export function sendError(res, status, title, message) {
   res.writeHead(status, {
     'content-type': 'text/html; charset=utf-8',
     'content-length': Buffer.byteLength(body),
+    'cache-control': 'no-store',
+    // 원본 서버의 에러 응답(상태코드 그대로 전달)과 프록시 자체 에러를 구분하는 표시
+    'x-proxy-error': '1',
   });
   res.end(body);
 }

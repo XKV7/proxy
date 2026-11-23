@@ -148,10 +148,12 @@ test('WebSocket: ws://localhost:PORT/__proxy/ws?url=... , 서브클래스도 동
   new w.WebSocket('/live'); // 상대 URL은 원본 기준, https -> wss
   class MySocket extends w.WebSocket {}
   const s = new MySocket('ws://x.com/');
+  // 페이지의 원본 origin도 함께 보낸다 (서버가 Origin 헤더를 원본 기준으로 맞추도록, 7단계)
+  const origin = `&origin=${encodeURIComponent(SITE)}`;
   assert.deepEqual(calls.ws.map((c) => c.url), [
-    `ws://localhost:8080/__proxy/ws?url=${encodeURIComponent('wss://chat.example.com/socket?room=1')}`,
-    `ws://localhost:8080/__proxy/ws?url=${encodeURIComponent('wss://www.example.com/live')}`,
-    `ws://localhost:8080/__proxy/ws?url=${encodeURIComponent('ws://x.com/')}`,
+    `ws://localhost:8080/__proxy/ws?url=${encodeURIComponent('wss://chat.example.com/socket?room=1')}${origin}`,
+    `ws://localhost:8080/__proxy/ws?url=${encodeURIComponent('wss://www.example.com/live')}${origin}`,
+    `ws://localhost:8080/__proxy/ws?url=${encodeURIComponent('ws://x.com/')}${origin}`,
   ]);
   assert.deepEqual(calls.ws[0].protocols, ['v1']);
   assert.ok(s instanceof MySocket);

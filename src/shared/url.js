@@ -158,9 +158,11 @@ export function proxifyClientUrl(value, base, proxyOrigin) {
  * @param {*} value 페이지 JS가 넘긴 URL
  * @param {string} base 원본 기준 URL
  * @param {string} proxyOrigin 예) "http://localhost:8080" (https면 wss로)
+ * @param {string} [pageOrigin] 연결을 여는 페이지의 원본 origin. 서버가 Origin 헤더를 원본 기준으로 맞추는 데 쓴다
+ *   (브라우저는 WebSocket 핸드셰이크에 Referer를 보내지 않으므로 URL에 실어 보낸다)
  * @returns {string|null} 변환할 수 없으면 null (호출한 쪽이 원래 값으로 네이티브 에러를 내게 둔다)
  */
-export function encodeWsProxyUrl(value, base, proxyOrigin) {
+export function encodeWsProxyUrl(value, base, proxyOrigin, pageOrigin) {
   let u;
   try {
     u = new URL(String(value), base);
@@ -173,7 +175,8 @@ export function encodeWsProxyUrl(value, base, proxyOrigin) {
   u.hash = '';
   const proxy = new URL(proxyOrigin);
   const wsOrigin = (proxy.protocol === 'https:' ? 'wss://' : 'ws://') + proxy.host;
-  return `${wsOrigin}${CLIENT_PREFIX}ws?url=${encodeURIComponent(u.href)}`;
+  const origin = pageOrigin ? `&origin=${encodeURIComponent(pageOrigin)}` : '';
+  return `${wsOrigin}${CLIENT_PREFIX}ws?url=${encodeURIComponent(u.href)}${origin}`;
 }
 
 /**
@@ -182,11 +185,26 @@ export function encodeWsProxyUrl(value, base, proxyOrigin) {
  * @returns {string|null}
  */
 export function decodeWsProxyUrl(pathAndQuery) {
+  return decodeWsProxyRequest(pathAndQuery)?.url ?? null;
+}
+
+/**
+ * 프록시 WebSocket 요청 경로 -> { url: 원본 ws(s) URL, origin: 페이지 원본 origin 또는 null }
+ * @returns {{ url: string, origin: string|null } | null}
+ */
+export function decodeWsProxyRequest(pathAndQuery) {
   try {
     const u = new URL(pathAndQuery, 'http://proxy.invalid');
     if (u.pathname !== `${CLIENT_PREFIX}ws`) return null;
     const target = new URL(u.searchParams.get('url'));
-    return target.protocol === 'ws:' || target.protocol === 'wss:' ? target.href : null;
+    if (target.protocol !== 'ws:' && target.protocol !== 'wss:') return null;
+    let origin = null;
+    const o = u.searchParams.get('origin');
+    if (o) {
+      const parsed = new URL(o);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') origin = parsed.origin;
+    }
+    return { url: target.href, origin };
   } catch {
     return null;
   }
