@@ -1,0 +1,26 @@
+{
+  // GitHub Codespaces / Dev Containers 설정: 터미널 없이 "Create codespace" 만으로 프록시를 실행한다.
+  "name": "Web Proxy (학습용)",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm",
+  "hostRequirements": { "cpus": 2 },
+
+  // 처음 만들 때 한 번: 의존성 설치
+  "postCreateCommand": "npm install",
+  // 편집기가 연결될 때마다: 터미널 창에서 서버 실행 (로그가 보이고, 창이 열려 있는 동안 계속 동작)
+  "postAttachCommand": "npm start",
+
+  "forwardPorts": [8080],
+  "portsAttributes": {
+    "8080": {
+      "label": "Web Proxy",
+      // 서버가 뜨면 프록시 시작 페이지를 브라우저 새 탭으로 연다
+      "onAutoForward": "openBrowser"
+    }
+  },
+
+  "customizations": {
+    "codespaces": {
+      "openFiles": ["README.md"]
+    }
+  }
+}
