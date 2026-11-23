@@ -27,6 +27,21 @@ npm start            # http://localhost:8080/
 
 > ⚠️ 서비스 워커는 HTTPS 또는 `localhost`에서만 동작합니다. `127.0.0.1`이 아니라 **`localhost`** 주소로 접속하세요.
 
+### 터미널 없이 실행하기 (GitHub Codespaces, 태블릿 가능)
+
+컴퓨터가 없거나 터미널을 쓸 수 없으면 GitHub Codespaces(브라우저에서 쓰는 클라우드 개발 환경)로 실행할 수 있습니다.
+설치와 실행은 `.devcontainer/devcontainer.json` 설정으로 자동으로 진행됩니다.
+
+1. 브라우저(태블릿은 Safari/Chrome, GitHub 앱 말고)로 이 저장소에 들어가 원하는 브랜치를 고릅니다.
+2. **Code → Codespaces → Create codespace** 를 누릅니다. 처음에는 준비에 1~2분 걸립니다.
+3. 편집기 화면 아래 터미널에 `프록시 실행 중`이 뜨면 프록시 시작 페이지가 새 탭으로 열립니다.
+   열리지 않으면 아래 **PORTS** 탭에서 `8080 (Web Proxy)` 줄의 지구본 아이콘을 누르세요.
+   주소는 `https://<이름>-8080.app.github.dev` 형태이고, 본인 GitHub 계정으로만 열리는 비공개 주소입니다.
+4. 다 쓰면 `github.com/codespaces` 에서 해당 Codespace를 **Stop** 해 두면 무료 사용 시간을 아낄 수 있습니다.
+   (아무 입력이 없으면 일정 시간 뒤 자동으로 멈추고, 다시 열면 서버도 다시 실행됩니다)
+
+> 포트를 Public 으로 바꾸지 마세요. 누구나 쓸 수 있는 공개 프록시가 됩니다.
+
 ## 테스트
 
 ```bash
